@@ -13,6 +13,8 @@ from pathlib import Path
 import os
 import re
 from datetime import datetime
+from sklearn.linear_model import LinearRegression
+from scipy.interpolate import interp1d
 
 def read_log_file(filepath):
     metadata = {}
@@ -184,10 +186,7 @@ def find_matching_specimen(datetime_substring, df):
         print("Specimen details not detected")
     return specimen, specimen_thickness, specimen_width
             
-        
-    
-
-if __name__ == "__main__":
+def process_tensile_data_directory():
     root = Tk()
     root.wm_attributes('-topmost', 1)
     directory = Path(fd.askdirectory(title="Select Data Directory"))
@@ -206,30 +205,16 @@ if __name__ == "__main__":
         try:
             # Get the matching datetime from the file name
             dt = extract_datetime_string(filepath)
-            # if dt:
-            #     print(f"\nExtracted datetime string: {dt}")
-            # else:
-            #     print(f"\nCould not extract datetime from {filepath}")
             
-            # Step through the 
+            # Step through the results files and get the specimen parameters
             specimen, specimen_thickness, specimen_width = find_matching_specimen(dt, df)
-            # if specimen and specimen_thickness and specimen_width:
-            #     print(f"\nSpecimen data:\t{specimen}\t{specimen_thickness}\t{specimen_width}")
-            # else:
-            #     print(f"\nCould not extract specimen data for {filepath}")
             
             # Find the matching log file and search it for the 
             # Extract the force-displacement data from the data file
             metadata, dfdata = read_log_file(filepath)
-            # print("\nMetadata:", metadata)
-            # print("\nDataframe:\n", df.head())
             
             # Process the tensile data into stress and strain
             A = specimen_thickness * specimen_width     # cross-sectional area, mm^2
-            # if specimen == 'W1P1TVX':
-            #     print(f'Specimen {specimen}:')
-            #     print(f'Thickness: {specimen_thickness}')
-            #     print(f'Width: {specimen_width}')
             print(f'\nSpecimen {specimen}:')
             print(f'Thickness: {specimen_thickness}')
             print(f'Width: {specimen_width}')
@@ -244,10 +229,48 @@ if __name__ == "__main__":
             dfdata = dfdata.drop(columns=['diff'])
             
             # Save dfdata with the specimen name
-            data_filename = specimen + '.csv'
+            data_filename = 'Processed Test Data/' + specimen + '.csv'
             data_filepath = directory / data_filename
-            dfdata.to_csv(data_filepath, index=False)
+            
+            # Add more data at the beginning of the output CSV file
+            # Ultimate Tensile Strength (MPa)
+            uts = np.max(dfdata['Stress (MPa)'])
+            
+            # Chord method for Young's Modulus
+            interp_func = interp1d(dfdata['Strain'], dfdata['Stress (MPa)'], kind='linear')
+            sigma0005 = interp_func(0.0005)
+            sigma0025 = interp_func(0.0025)
+            Et_chord = (sigma0025-sigma0005)/(0.0025 - 0.0005)
+            
+            # Linear regression method for Young's Modulus
+            filtered_df = dfdata[(dfdata['Strain'] >= 0.0005) & (dfdata['Strain'] <= 0.0025)]
+            X = filtered_df[['Strain']]
+            y = filtered_df['Stress (MPa)']
+            model = LinearRegression().fit(X, y)
+            Et_regr = model.coef_[0]
+            
+            specimen_info = {
+                'Specimen Code': specimen,
+                'Specimen Thickness': specimen_thickness,
+                'Specimen Width': specimen_width,
+                'Ultimate Tensile Strength (MPa)': uts,
+                'Modulus of Elasticity - Chord': Et_chord,
+                'Modulus of Elasticity - Regression': Et_regr}
+            
+            # Write the specimen information to the file
+            with open(data_filepath, 'w') as f:
+                for key, value in specimen_info.items():
+                    f.write(f'{key},{value}\n')     # Write each key-value pair as a new line
+                    
+                f.write('\n')   # Add an empty line between metadata and DataFrame content
+                
+            dfdata.to_csv(data_filepath, mode='a', index=False)
+            
             
         except Exception as e:
             print(f"Error: {e}")
                 
+    
+
+if __name__ == "__main__":
+    process_tensile_data_directory()
