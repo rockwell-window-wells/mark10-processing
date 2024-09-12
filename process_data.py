@@ -7,14 +7,32 @@ Created on Thu Sep  5 13:40:25 2024
 
 import pandas as pd
 import numpy as np
+import tkinter as tk
 from tkinter import Tk
 from tkinter import filedialog as fd
+from tkinter import StringVar
 from pathlib import Path
 import os
 import re
 from datetime import datetime
 from sklearn.linear_model import LinearRegression
 from scipy.interpolate import interp1d
+from threading import Thread
+from pyupdater.client import Client
+from update_config import ClientConfig
+
+APP_NAME = "Mark 10 Post-Processor"
+APP_VERSION = "1.0.0"
+
+def check_for_updates():
+    client = Client(ClientConfig(), refresh=True)  # ClientConfig is the configuration class for PyUpdater
+    app_update = client.update_check(APP_NAME, APP_VERSION)  # Define your app name and version here
+    
+    if app_update is not None:
+        print("Update available! Downloading now...")
+        app_update.download()
+        if app_update.is_downloaded():
+            app_update.extract_restart()  # Restarts the app after the update
 
 def read_log_file(filepath):
     metadata = {}
@@ -88,9 +106,6 @@ def read_rsl_file(filepath):
                 # reading_metadata = False
                 headers = line.strip().split("\t")  # Capture the table headers
                 continue
-            # elif ".rsl" in line:
-            #     reading_data = False
-            #     # reading_metadata = True
             elif "Statistics" in line:
                 reading_data = False
                 # reading_metadata = False
@@ -100,19 +115,6 @@ def read_rsl_file(filepath):
             # If reading the data part, collect the rows
             if reading_data:
                 data_lines.append(line.strip().split("\t"))
-            # elif reading_metadata:
-            #     if ".rsl" in line:
-            #         metadata["Filename"] = line
-            #     else:
-            #         key, value = line.strip().split(":", 1)
-            #         metadata[key.strip()] = value.strip()
-            # else:
-            #     # Extract metadata key-value pairs before the table starts
-            #     if ":" in line:
-            #         key, value = line.strip().split(":", 1)
-            #         metadata[key.strip()] = value.strip()
-            #     elif ".log" in line:
-            #         metadata["Filename"] = line
 
                     
     # Create DataFrame from the data table portion
@@ -161,8 +163,23 @@ def find_matching_specimen(datetime_substring, df):
         # Format the time as HH:MM:SS AM/PM
         time = f"{int(hour):02}:{minute}:{second} {am_pm.upper()}"
     else:
-        date = None
-        time = None
+        pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2}))"
+        match = re.search(pattern, datetime_substring)
+        if match:
+            # Extract the components from the regex match
+            month_str, day, year, hour, minute, second, am_pm = match.groups()
+            
+            # Convert the month abbreviation to numeric format
+            month = month_map[month_str]
+            
+            # Format the date as MM/DD/YYYY
+            date = f"{month_str} {int(day)}, {year}"
+            
+            # Format the time as HH:MM:SS AM/PM
+            time = f"{int(hour):02}:{minute}:{second} {am_pm.upper()}"
+        else:
+            date = None
+            time = None
     
     # Read results files and find a good run that contains the matching date
     # and time information
@@ -186,17 +203,14 @@ def find_matching_specimen(datetime_substring, df):
         print("Specimen details not detected")
     return specimen, specimen_thickness, specimen_width
             
-def process_tensile_data_directory():
-    root = Tk()
-    root.wm_attributes('-topmost', 1)
-    directory = Path(fd.askdirectory(title="Select Data Directory"))
-    root.destroy()
-    
-    files = os.listdir(directory)
+def process_tensile_data_directory(directory):    
+    # files = os.listdir(Path(directory))
+    files = [f for f in os.listdir(Path(directory)) if os.path.isfile(os.path.join(directory, f))]
     data = {"File": files}
     df = pd.DataFrame(data)
     
-    df["Filepath"] = [directory / file for file in df["File"]]
+    df["Filepath"] = [(directory + "/" + file) for file in df["File"]]
+    # df["Filepath"] = [directory / file for file in df["File"]]
     df["Data"] = [True if (".log" in file) else False for file in df["File"]]
     df["Results"] = [True if (".rsl" in file) else False for file in df["File"]]
     
@@ -215,9 +229,9 @@ def process_tensile_data_directory():
             
             # Process the tensile data into stress and strain
             A = specimen_thickness * specimen_width     # cross-sectional area, mm^2
-            print(f'\nSpecimen {specimen}:')
-            print(f'Thickness: {specimen_thickness}')
-            print(f'Width: {specimen_width}')
+            # print(f'\nSpecimen {specimen}:')
+            # print(f'Thickness: {specimen_thickness}')
+            # print(f'Width: {specimen_width}')
             gauge_length = 115.0
             dfdata['Stress (MPa)'] = -dfdata['Load [N]'] / A
             dfdata['Strain'] = dfdata['Distance [mm]'] / gauge_length
@@ -230,7 +244,7 @@ def process_tensile_data_directory():
             
             # Save dfdata with the specimen name
             data_filename = 'Processed Test Data/' + specimen + '.csv'
-            data_filepath = directory / data_filename
+            data_filepath = directory + "/" + data_filename
             
             # Add more data at the beginning of the output CSV file
             # Ultimate Tensile Strength (MPa)
@@ -269,8 +283,86 @@ def process_tensile_data_directory():
             
         except Exception as e:
             print(f"Error: {e}")
+            
+    tensile_message.set("Tensile data processed successfully")
+    root.after(10000, clear_tensile_message)
                 
-    
 
+# def process_tensile_data(tensile_dir):
+#     # Dummy function to simulate processing tensile data
+#     tensile_message.set("Tensile data processed successfully")
+#     root.after(10000, clear_tensile_message)  # Clear message after 10 seconds
+
+def process_flexural_data(flexural_dir):
+    # Dummy function to simulate processing flexural data
+    flexural_message.set("Flexural data processed successfully")
+    root.after(10000, clear_flexural_message)  # Clear message after 10 seconds
+
+def clear_tensile_message():
+    tensile_message.set("")
+
+def clear_flexural_message():
+    flexural_message.set("")
+
+def select_tensile_directory():
+    root = Tk()
+    root.withdraw()  # Hide the main window
+    directory = fd.askdirectory(title="Select the Tensile Data Directory")
+    root.destroy()
+    tensile_directory.set(directory)
+    
+def select_flexural_directory():
+    root = Tk()
+    root.withdraw()  # Hide the main window
+    directory = fd.askdirectory(title="Select the Flexural Data Directory")
+    root.destroy()
+    flexural_directory.set(directory)
+    
 if __name__ == "__main__":
-    process_tensile_data_directory()
+    check_for_updates()
+    
+    # Main application window
+    root = tk.Tk()
+    root.attributes("-topmost", True)
+    root.title("Mark-10 Data Processing")
+    
+    # Variables for directory paths and messages
+    tensile_directory = StringVar(value="G:\Shared drives\RockWell Shared\Engineering\Engineering Projects\DLFT\DLFT Testing\Production Testing\Tensile Tests")
+    flexural_directory = StringVar(value="G:\Shared drives\RockWell Shared\Engineering\Engineering Projects\DLFT\DLFT Testing\Production Testing\Flexural Tests")
+    tensile_message = StringVar(value="")
+    flexural_message = StringVar(value="")
+    
+    # Buttons and labels for selecting directories
+    btn_select_tensile = tk.Button(root, text="Select Tensile Directory", command=lambda: select_tensile_directory())
+    btn_select_flexural = tk.Button(root, text="Select Flexural Directory", command=lambda: select_flexural_directory())
+    lbl_tensile_dir = tk.Label(root, textvariable=tensile_directory)
+    lbl_flexural_dir = tk.Label(root, textvariable=flexural_directory)
+    
+    # Buttons for processing data
+    btn_process_tensile = tk.Button(root, text="Process Tensile Data",
+                                    command=lambda: process_tensile_data_directory(tensile_directory.get()))
+    btn_process_flexural = tk.Button(root, text="Process Flexural Data",
+                                     command=lambda: process_flexural_data(flexural_directory.get()))
+    
+    # Labels for processing messages
+    lbl_tensile_message = tk.Label(root, textvariable=tensile_message)
+    lbl_flexural_message = tk.Label(root, textvariable=flexural_message)
+    
+    # Layout for the first set (Select buttons and directory labels)
+    btn_select_tensile.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+    lbl_tensile_dir.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+    btn_select_flexural.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+    lbl_flexural_dir.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+    
+    # Adding some visual separation between the two sets of buttons
+    separator = tk.Frame(root, height=2, bd=1, relief="sunken")
+    separator.grid(row=2, columnspan=2, pady=10, padx=10, sticky="ew")
+    
+    # Layout for the second set (Process buttons and messages)
+    btn_process_tensile.grid(row=3, column=0, padx=10, pady=5, sticky="w")
+    lbl_tensile_message.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+    btn_process_flexural.grid(row=4, column=0, padx=10, pady=5, sticky="w")
+    lbl_flexural_message.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+    
+    # Run the application
+    root.mainloop()

@@ -1,0 +1,20 @@
+{
+  "config_dir": "C:\\Users\\Ryan.Larson.ROCKWELLINC\\github\\mark10-processing\\.pyupdater",
+  "filename": "C:\\Users\\Ryan.Larson.ROCKWELLINC\\github\\mark10-processing\\.pyupdater\\config.pyu",
+  "count": 0,
+  "app_config": {
+    "APP_NAME": "Mark 10 Post-Processor",
+    "CLIENT_CONFIG_PATH": [
+      "client_config.py"
+    ],
+    "COMPANY_NAME": "Ryan Larson",
+    "PLUGIN_CONFIGS": {},
+    "UPDATE_PATCHES": false,
+    "MAX_DOWNLOAD_RETRIES": 3,
+    "HTTP_TIMEOUT": 30,
+    "UPDATE_URLS": [
+      "https://github.com/rockwell-window-wells/mark10-processing/releases"
+    ],
+    "DATA_DIR": "C:\\Users\\Ryan.Larson.ROCKWELLINC\\github\\mark10-processing"
+  }
+}
