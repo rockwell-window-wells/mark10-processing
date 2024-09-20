@@ -258,7 +258,8 @@ def find_matching_specimen(datetime_substring, df):
             specimen_width = float(specimen_width)
             break
     if (specimen is None) and (specimen_thickness is None) and (specimen_width is None):
-        print(f"\nSpecimen details not detected. File: {filepath}")
+        # print(f"\nSpecimen details not detected. File: {filepath}")
+        error_message.set(f"Specimen details not detected. File: {filepath}")
     return specimen, specimen_thickness, specimen_width
             
 def process_tensile_data_directory(directory):    
@@ -343,7 +344,8 @@ def process_tensile_data_directory(directory):
             
             
         except Exception as e:
-            print(f"Error: {e}")
+            # print(f"Error: {e}")
+            error_message.set(f"Error: {e}\t({filepath})")
     
     results_filepath = directory + "/Processed Test Data/Tensile_results.csv"
     df_results.to_csv(results_filepath)
@@ -458,7 +460,8 @@ def process_flexural_data_directory(directory):
             
             
         except Exception as e:
-            print(f"\nError: {e}\t({filepath})")
+            # print(f"\nError: {e}\t({filepath})")
+            error_message.set(f"Error: {e}\t({filepath})")
     
     results_filepath = directory + "/Processed Test Data/Flexural_results.csv"
     df_results.to_csv(results_filepath)
@@ -498,6 +501,7 @@ if __name__ == "__main__":
     flexural_directory = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Flexural Tests")
     tensile_message = StringVar(value="")
     flexural_message = StringVar(value="")
+    error_message = StringVar(value="")
     
     # Buttons and labels for selecting directories
     btn_select_tensile = tk.Button(root, text="Select Tensile Directory", command=lambda: select_tensile_directory())
@@ -515,6 +519,9 @@ if __name__ == "__main__":
     lbl_tensile_message = tk.Label(root, textvariable=tensile_message)
     lbl_flexural_message = tk.Label(root, textvariable=flexural_message)
     
+    # Label for error messages
+    lbl_error_message = tk.Label(root, textvariable=error_message)
+    
     # Layout for the first set (Select buttons and directory labels)
     btn_select_tensile.grid(row=0, column=0, padx=10, pady=5, sticky="w")
     lbl_tensile_dir.grid(row=0, column=1, padx=10, pady=5, sticky="w")
@@ -530,6 +537,7 @@ if __name__ == "__main__":
     lbl_tensile_message.grid(row=3, column=1, padx=10, pady=5, sticky="w")
     btn_process_flexural.grid(row=4, column=0, padx=10, pady=5, sticky="w")
     lbl_flexural_message.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+    lbl_error_message.grid(row=5, column=0, padx=10, pady=5, sticky="w")
     
     # Run the application
     root.mainloop()
