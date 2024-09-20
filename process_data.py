@@ -14,25 +14,76 @@ from tkinter import StringVar
 from pathlib import Path
 import os
 import re
-from datetime import datetime
 from sklearn.linear_model import LinearRegression
 from scipy.interpolate import interp1d
-from threading import Thread
-from pyupdater.client import Client
-from update_config import ClientConfig
+from scipy.signal import savgol_filter
+# from threading import Thread
 
-APP_NAME = "Mark 10 Post-Processor"
-APP_VERSION = "1.0.0"
+def apply_savgol_filter(data, window_size, poly_order):
+    """
+    Applies the Savitzky-Golay filter to smooth the input data.
 
-def check_for_updates():
-    client = Client(ClientConfig(), refresh=True)  # ClientConfig is the configuration class for PyUpdater
-    app_update = client.update_check(APP_NAME, APP_VERSION)  # Define your app name and version here
+    Parameters:
+    data (array-like): The noisy data to be smoothed.
+    window_size (int): The size of the filter window (must be an odd integer).
+    poly_order (int): The order of the polynomial used to fit the data.
+
+    Returns:
+    smoothed_data (numpy array): The smoothed data.
+    """
+    # Ensure window_size is odd and greater than poly_order
+    if window_size % 2 == 0:
+        raise ValueError("Window size must be an odd integer.")
+    if poly_order >= window_size:
+        raise ValueError("Polynomial order must be less than window size.")
     
-    if app_update is not None:
-        print("Update available! Downloading now...")
-        app_update.download()
-        if app_update.is_downloaded():
-            app_update.extract_restart()  # Restarts the app after the update
+    # Apply Savitzky-Golay filter
+    smoothed_data = savgol_filter(data, window_size, poly_order)
+    
+    return smoothed_data
+
+def start_filter(load_column, target_value=10, zero_value=0):
+    # Find the first occurrence of the target value (e.g., 10 N)
+    target_index = load_column[load_column >= target_value].index[0]
+    
+    # Find the closest previous occurrence of the zero_value (e.g., 0 N)
+    zero_indices = load_column[:target_index][load_column[:target_index] == zero_value]
+    
+    if not zero_indices.empty:
+        starting_index = zero_indices.index[-1]  # Get the last occurrence of 0 before the target value
+    else:
+        starting_index = None  # Handle case if there's no zero before target_value
+    
+    return starting_index
+
+def recalculate_distance(df, rate):
+    df.reset_index(drop=True, inplace=True)
+    recalculated_distance = np.zeros(len(df))
+    for i in range(len(df)):
+        if i == 0:
+            recalculated_distance[i] = df.loc[i,'Distance [mm]']
+        else:
+            recalculated_distance[i] = (14/60)*(df.loc[i, 'Time [s]'] - df.loc[0,'Time [s]']) + df.loc[0,'Distance [mm]']
+    df['Recalculated Distance [mm]'] = recalculated_distance
+    
+def find_zero_distance(df):
+    # df.reset_index(drop=True, inplace=True)
+    df['Smoothed Slope'] = np.gradient(df['Savitzky-Golay Smoothed Load [N]'], df['Recalculated Distance [mm]'])
+    b = df.loc[0,'Savitzky-Golay Smoothed Load [N]'] - df.loc[0,'Smoothed Slope'] * df.loc[0,'Recalculated Distance [mm]']
+    x = -b / df.loc[0,'Smoothed Slope']
+    
+    # Get new force-distance curve
+    dfnew = df[['Recalculated Distance [mm]',
+                'Savitzky-Golay Smoothed Load [N]']].copy()
+    
+    # Add a row to the beginning of dfnew for the recalculated distance
+    new_row = pd.DataFrame({'Recalculated Distance [mm]': [x],
+                            'Savitzky-Golay Smoothed Load [N]': [0.0]})
+    
+    dfnew = pd.concat([new_row, dfnew], ignore_index=True)
+    dfnew.reset_index(drop=True, inplace=True)
+    
+    return dfnew
 
 def read_log_file(filepath):
     metadata = {}
@@ -67,19 +118,20 @@ def read_log_file(filepath):
     
     return metadata, df
 
-def extract_datetime_string(filename):
+def extract_datetime_string(filename):    
     # Regular expression to match the date and time in the filename
     pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2})-([A-Za-z]{2})"
-    
-    # Month abbreviations mapping to numbers for datetime parsing
-    month_map = { 'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-                  'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12 }
     
     match = re.search(pattern, str(filename))
     if match:
         return match.group(0)
     else:
-        return None
+        pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2})"
+        match = re.search(pattern, str(filename))
+        if match:
+            return match.group(0)
+        else:
+            return None
     
 def find_results_file(datetime_string, filepaths_column):
     matches = []
@@ -124,6 +176,7 @@ def read_rsl_file(filepath):
     dtype_dict = {
         'Run No.': int,
         'Status': str,
+        'Specimen Code': str,
         'Specimen Number': str,
         'Specimen Thickness': float,
         'Specimen Width': float,
@@ -139,14 +192,16 @@ def read_rsl_file(filepath):
         'Area Under Curve (N*mm)': float
         }
     
-    df = df.astype(dtype_dict)
+    dtype_dict_sub = {col:dtype_dict[col] for col in df.columns }
+    
+    df = df.astype(dtype_dict_sub)
     
     return df
 
 def find_matching_specimen(datetime_substring, df):
     # Convert datetime_substring to date and time data
-    month_map = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
-             'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
+    # month_map = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
+    #          'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
     pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2})-([A-Za-z]{2})"
     
     match = re.search(pattern, datetime_substring)
@@ -154,8 +209,8 @@ def find_matching_specimen(datetime_substring, df):
         # Extract the components from the regex match
         month_str, day, year, hour, minute, second, am_pm = match.groups()
         
-        # Convert the month abbreviation to numeric format
-        month = month_map[month_str]
+        # # Convert the month abbreviation to numeric format
+        # month = month_map[month_str]
         
         # Format the date as MM/DD/YYYY
         date = f"{month_str} {int(day)}, {year}"
@@ -163,20 +218,20 @@ def find_matching_specimen(datetime_substring, df):
         # Format the time as HH:MM:SS AM/PM
         time = f"{int(hour):02}:{minute}:{second} {am_pm.upper()}"
     else:
-        pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2}))"
+        pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2})"
         match = re.search(pattern, datetime_substring)
         if match:
             # Extract the components from the regex match
-            month_str, day, year, hour, minute, second, am_pm = match.groups()
+            month_str, day, year, hour, minute, second = match.groups()
             
-            # Convert the month abbreviation to numeric format
-            month = month_map[month_str]
+            # # Convert the month abbreviation to numeric format
+            # month = month_map[month_str]
             
             # Format the date as MM/DD/YYYY
             date = f"{month_str} {int(day)}, {year}"
             
             # Format the time as HH:MM:SS AM/PM
-            time = f"{int(hour):02}:{minute}:{second} {am_pm.upper()}"
+            time = f"{int(hour):02}:{minute}:{second}"
         else:
             date = None
             time = None
@@ -191,7 +246,10 @@ def find_matching_specimen(datetime_substring, df):
         
         for i in range(len(df_results)):
             if (df_results.loc[i,"Date"] == date) and (df_results.loc[i,"Time"] == time) and (df_results.loc[i,"Status"] == "Complete"):
-                specimen = df_results.loc[i,"Specimen Number"]
+                if "Specimen Code" in df_results.columns:
+                    specimen = df_results.loc[i,"Specimen Code"]
+                else:
+                    specimen = df_results.loc[i,"Specimen Number"]
                 specimen_thickness = df_results.loc[i,"Specimen Thickness"]
                 specimen_width = df_results.loc[i,"Specimen Width"]
                 break
@@ -200,7 +258,7 @@ def find_matching_specimen(datetime_substring, df):
             specimen_width = float(specimen_width)
             break
     if (specimen is None) and (specimen_thickness is None) and (specimen_width is None):
-        print("Specimen details not detected")
+        print(f"\nSpecimen details not detected. File: {filepath}")
     return specimen, specimen_thickness, specimen_width
             
 def process_tensile_data_directory(directory):    
@@ -213,6 +271,8 @@ def process_tensile_data_directory(directory):
     # df["Filepath"] = [directory / file for file in df["File"]]
     df["Data"] = [True if (".log" in file) else False for file in df["File"]]
     df["Results"] = [True if (".rsl" in file) else False for file in df["File"]]
+    
+    df_results = pd.DataFrame()
     
     # Load the data files only
     for filepath in df[df["Data"]==True]["Filepath"]:
@@ -229,9 +289,6 @@ def process_tensile_data_directory(directory):
             
             # Process the tensile data into stress and strain
             A = specimen_thickness * specimen_width     # cross-sectional area, mm^2
-            # print(f'\nSpecimen {specimen}:')
-            # print(f'Thickness: {specimen_thickness}')
-            # print(f'Width: {specimen_width}')
             gauge_length = 115.0
             dfdata['Stress (MPa)'] = -dfdata['Load [N]'] / A
             dfdata['Strain'] = dfdata['Distance [mm]'] / gauge_length
@@ -264,17 +321,21 @@ def process_tensile_data_directory(directory):
             Et_regr = model.coef_[0]
             
             specimen_info = {
-                'Specimen Code': specimen,
-                'Specimen Thickness': specimen_thickness,
-                'Specimen Width': specimen_width,
-                'Ultimate Tensile Strength (MPa)': uts,
-                'Modulus of Elasticity - Chord': Et_chord,
-                'Modulus of Elasticity - Regression': Et_regr}
+                'Specimen Code': [specimen],
+                'Specimen Thickness': [specimen_thickness],
+                'Specimen Width': [specimen_width],
+                'Ultimate Tensile Strength (MPa)': [uts],
+                'Modulus of Elasticity - Chord': [Et_chord],
+                'Modulus of Elasticity - Regression': [Et_regr]}
+            
+            new_row = pd.DataFrame(specimen_info)
+            df_results = pd.concat([new_row, df_results], ignore_index=True)
+            df_results.reset_index(drop=True, inplace=True)
             
             # Write the specimen information to the file
             with open(data_filepath, 'w') as f:
                 for key, value in specimen_info.items():
-                    f.write(f'{key},{value}\n')     # Write each key-value pair as a new line
+                    f.write(f'{key},{value[0]}\n')     # Write each key-value pair as a new line
                     
                 f.write('\n')   # Add an empty line between metadata and DataFrame content
                 
@@ -283,20 +344,126 @@ def process_tensile_data_directory(directory):
             
         except Exception as e:
             print(f"Error: {e}")
-            
+    
+    results_filepath = directory + "/Processed Test Data/Tensile_results.csv"
+    df_results.to_csv(results_filepath)
     tensile_message.set("Tensile data processed successfully")
     root.after(10000, clear_tensile_message)
                 
 
-# def process_tensile_data(tensile_dir):
-#     # Dummy function to simulate processing tensile data
-#     tensile_message.set("Tensile data processed successfully")
-#     root.after(10000, clear_tensile_message)  # Clear message after 10 seconds
-
-def process_flexural_data(flexural_dir):
-    # Dummy function to simulate processing flexural data
+def process_flexural_data_directory(directory):    
+    # files = os.listdir(Path(directory))
+    files = [f for f in os.listdir(Path(directory)) if os.path.isfile(os.path.join(directory, f))]
+    data = {"File": files}
+    df = pd.DataFrame(data)
+    
+    df["Filepath"] = [(directory + "/" + file) for file in df["File"]]
+    # df["Filepath"] = [directory / file for file in df["File"]]
+    df["Data"] = [True if (".log" in file) else False for file in df["File"]]
+    df["Results"] = [True if (".rsl" in file) else False for file in df["File"]]
+    
+    df_results = pd.DataFrame()
+    
+    # Load the data files only
+    for filepath in df[df["Data"]==True]["Filepath"]:
+        try:
+            # Get the matching datetime from the file name
+            dt = extract_datetime_string(filepath)
+            
+            # Step through the results files and get the specimen parameters
+            specimen, specimen_thickness, specimen_width = find_matching_specimen(dt, df)
+            
+            # Find the matching log file and search it for the 
+            # Extract the force-displacement data from the data file
+            metadata, dfdata = read_log_file(filepath)
+            
+            # Smooth and shift force-distance data for better determination of
+            # properties
+            if dfdata.loc[100, 'Distance [mm]'] < dfdata.loc[0, 'Distance [mm]']:
+                dfdata['Distance [mm]'] = -dfdata['Distance [mm]']
+            rising_index = start_filter(dfdata['Load [N]'])
+            dfdata = dfdata.iloc[rising_index:].copy()
+            window_size = 201
+            poly_order = 2
+            dfdata['Savitzky-Golay Smoothed Load [N]'] = apply_savgol_filter(dfdata['Load [N]'], window_size, poly_order)
+            recalculate_distance(dfdata, 14.0)
+            dfnew = find_zero_distance(dfdata)
+            dfnew['Recalculated Distance [mm]'] = dfnew['Recalculated Distance [mm]'] - dfnew.loc[0,'Recalculated Distance [mm]']
+            
+            # Process the flexural data into stress and strain
+            L = 64  # span, mm
+            h = specimen_thickness
+            b = specimen_width
+            
+            dfnew['Stress (MPa)'] = (3 * L * dfnew['Savitzky-Golay Smoothed Load [N]']) / (2 * b * h**2)
+            dfnew['Strain'] = (6 * h * dfnew['Recalculated Distance [mm]']) / (L**2)
+            # dfdata['Stress (MPa)'] = -(3 * L * dfdata['Load [N]']) / (2 * b * h**2)
+            # dfdata['Strain'] = (6 * h * dfdata['Distance [mm]']) / (L**2)
+            
+            # Filter out strain data so only strictly increasing strain is included
+            # dfnew['diff'] = dfnew['Strain'].diff()
+            # mask = dfnew['diff'] > 0
+            # dfnew = dfnew[mask]
+            # dfnew = dfnew.drop(columns=['diff'])
+            # # dfdata['diff'] = dfdata['Strain'].diff()
+            # # mask = dfdata['diff'] > 0
+            # # dfdata = dfdata[mask]
+            # # dfdata = dfdata.drop(columns=['diff'])
+            
+            # Save dfdata with the specimen name
+            data_filename = 'Processed Test Data/' + specimen + '.csv'
+            data_filepath = directory + "/" + data_filename
+            
+            # Add more data at the beginning of the output CSV file
+            # Ultimate Flexural Strength (MPa)
+            ufs = np.max(dfnew['Stress (MPa)'])
+            # ufs = np.max(dfdata['Stress (MPa)'])
+            
+            # Chord method for Young's Modulus
+            interp_func = interp1d(dfnew['Strain'], dfnew['Stress (MPa)'], kind='linear')
+            # interp_func = interp1d(dfdata['Strain'], dfdata['Stress (MPa)'], kind='linear')
+            sigma0005 = interp_func(0.0005)
+            sigma0025 = interp_func(0.0025)
+            Et_chord = (sigma0025-sigma0005)/(0.0025 - 0.0005)
+            
+            # Linear regression method for Young's Modulus
+            filtered_df = dfnew[(dfnew['Strain'] >= 0.0005) & (dfnew['Strain'] <= 0.0025)]
+            # filtered_df = dfdata[(dfdata['Strain'] >= 0.0005) & (dfdata['Strain'] <= 0.0025)]
+            X = filtered_df[['Strain']]
+            y = filtered_df['Stress (MPa)']
+            model = LinearRegression().fit(X, y)
+            Et_regr = model.coef_[0]
+            
+            specimen_info = {
+                'Specimen Code': [specimen],
+                'Specimen Thickness': [specimen_thickness],
+                'Specimen Width': [specimen_width],
+                'Ultimate Tensile Strength (MPa)': [ufs],
+                'Modulus of Elasticity - Chord': [Et_chord],
+                'Modulus of Elasticity - Regression': [Et_regr]}
+            
+            new_row = pd.DataFrame(specimen_info)
+            df_results = pd.concat([new_row, df_results], ignore_index=True)
+            df_results.reset_index(drop=True, inplace=True)
+            
+            # Write the specimen information to the file
+            with open(data_filepath, 'w') as f:
+                for key, value in specimen_info.items():
+                    f.write(f'{key},{value[0]}\n')     # Write each key-value pair as a new line
+                    
+                f.write('\n')   # Add an empty line between metadata and DataFrame content
+                
+            dfnew.to_csv(data_filepath, mode='a', index=False)
+            # dfdata.to_csv(data_filepath, mode='a', index=False)
+            
+            
+        except Exception as e:
+            print(f"\nError: {e}\t({filepath})")
+    
+    results_filepath = directory + "/Processed Test Data/Flexural_results.csv"
+    df_results.to_csv(results_filepath)
     flexural_message.set("Flexural data processed successfully")
-    root.after(10000, clear_flexural_message)  # Clear message after 10 seconds
+    root.after(10000, clear_flexural_message)
 
 def clear_tensile_message():
     tensile_message.set("")
@@ -319,7 +486,7 @@ def select_flexural_directory():
     flexural_directory.set(directory)
     
 if __name__ == "__main__":
-    check_for_updates()
+    # check_for_updates()
     
     # Main application window
     root = tk.Tk()
@@ -327,8 +494,8 @@ if __name__ == "__main__":
     root.title("Mark-10 Data Processing")
     
     # Variables for directory paths and messages
-    tensile_directory = StringVar(value="G:\Shared drives\RockWell Shared\Engineering\Engineering Projects\DLFT\DLFT Testing\Production Testing\Tensile Tests")
-    flexural_directory = StringVar(value="G:\Shared drives\RockWell Shared\Engineering\Engineering Projects\DLFT\DLFT Testing\Production Testing\Flexural Tests")
+    tensile_directory = StringVar(value="G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Tensile Tests")
+    flexural_directory = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Flexural Tests")
     tensile_message = StringVar(value="")
     flexural_message = StringVar(value="")
     
@@ -342,7 +509,7 @@ if __name__ == "__main__":
     btn_process_tensile = tk.Button(root, text="Process Tensile Data",
                                     command=lambda: process_tensile_data_directory(tensile_directory.get()))
     btn_process_flexural = tk.Button(root, text="Process Flexural Data",
-                                     command=lambda: process_flexural_data(flexural_directory.get()))
+                                     command=lambda: process_flexural_data_directory(flexural_directory.get()))
     
     # Labels for processing messages
     lbl_tensile_message = tk.Label(root, textvariable=tensile_message)
