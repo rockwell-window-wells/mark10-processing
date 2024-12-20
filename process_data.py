@@ -17,6 +17,7 @@ import re
 from sklearn.linear_model import LinearRegression
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
+from datetime import datetime, timedelta
 # from threading import Thread
 
 def apply_savgol_filter(data, window_size, poly_order):
@@ -63,7 +64,7 @@ def recalculate_distance(df, rate):
         if i == 0:
             recalculated_distance[i] = df.loc[i,'Distance [mm]']
         else:
-            recalculated_distance[i] = (14/60)*(df.loc[i, 'Time [s]'] - df.loc[0,'Time [s]']) + df.loc[0,'Distance [mm]']
+            recalculated_distance[i] = (14./60.)*(df.loc[i, 'Time [s]'] - df.loc[0,'Time [s]']) + df.loc[0,'Distance [mm]']
     df['Recalculated Distance [mm]'] = recalculated_distance
     
 def find_zero_distance(df):
@@ -192,9 +193,23 @@ def read_rsl_file(filepath):
         'Area Under Curve (N*mm)': float
         }
     
-    dtype_dict_sub = {col:dtype_dict[col] for col in df.columns }
+    dtype_dict_sub = {col:dtype_dict[col] for col in df.columns}
     
-    df = df.astype(dtype_dict_sub)
+    # df = df.astype(dtype_dict_sub)
+    
+    # Function to typecast columns while handling errors
+    def safe_cast_column(df, column_name, target_dtype):
+        if target_dtype == float:
+            df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
+        elif target_dtype == int:
+            df[column_name] = pd.to_numeric(df[column_name], errors='coerce').dropna().astype(int)
+        else:
+            # If target_dtype is str or other types, just ensure the type is consistent
+            df[column_name] = df[column_name].astype(target_dtype, errors='ignore')
+    
+    # Apply typecasting to each column
+    for col, dtype in dtype_dict_sub.items():
+        safe_cast_column(df, col, dtype)
     
     return df
 
@@ -241,11 +256,15 @@ def find_matching_specimen(datetime_substring, df):
     specimen = None
     specimen_thickness = None
     specimen_width = None
+    tolerance_seconds = 3
     for filepath in df[df["Results"]==True]["Filepath"]:
         df_results = read_rsl_file(filepath)
+        # df_results = df_results[df_results['Status']=='Complete'].copy()
         
         for i in range(len(df_results)):
-            if (df_results.loc[i,"Date"] == date) and (df_results.loc[i,"Time"] == time) and (df_results.loc[i,"Status"] == "Complete"):
+            # if (df_results.loc[i,"Date"] == date) and (df_results.loc[i,"Time"] == time) and (df_results.loc[i,"Status"] == "Complete"):
+            df_time = df_results.loc[i, "Time"]
+            if (df_results.loc[i,"Date"] == date) and is_time_within_tolerance(df_time, time, tolerance_seconds) and (df_results.loc[i,"Status"] == "Complete"):
                 if "Specimen Code" in df_results.columns:
                     specimen = df_results.loc[i,"Specimen Code"]
                 else:
@@ -261,6 +280,21 @@ def find_matching_specimen(datetime_substring, df):
         # print(f"\nSpecimen details not detected. File: {filepath}")
         error_message.set(f"Specimen details not detected. File: {filepath}")
     return specimen, specimen_thickness, specimen_width
+
+def is_time_within_tolerance(df_time_str, target_time_str, tolerance_seconds):
+    # Convert the time strings into datetime objects
+    df_time = datetime.strptime(df_time_str, '%H:%M:%S').time()
+    target_time = datetime.strptime(target_time_str, '%H:%M:%S').time()
+    
+    # Convert times into full datetime objects to allow subtraction
+    df_time_dt = datetime.combine(datetime.today(), df_time)
+    target_time_dt = datetime.combine(datetime.today(), target_time)
+    
+    # Calculate the absolute difference
+    time_diff = abs((df_time_dt - target_time_dt).total_seconds())
+    
+    # Check if the difference is within the tolerance
+    return time_diff <= tolerance_seconds
             
 def process_tensile_data_directory(directory):    
     # files = os.listdir(Path(directory))
@@ -301,8 +335,10 @@ def process_tensile_data_directory(directory):
             dfdata = dfdata.drop(columns=['diff'])
             
             # Save dfdata with the specimen name
-            data_filename = 'Processed Test Data/' + specimen + '.csv'
-            data_filepath = directory + "/" + data_filename
+            data_filename = specimen + '.csv'
+            # data_filename = 'Processed Test Data/' + specimen + '.csv'
+            data_filepath = directory + "/Processed Test Data/" + data_filename
+            # data_filepath = directory + "/" + data_filename
             
             # Add more data at the beginning of the output CSV file
             # Ultimate Tensile Strength (MPa)
@@ -316,10 +352,13 @@ def process_tensile_data_directory(directory):
             
             # Linear regression method for Young's Modulus
             filtered_df = dfdata[(dfdata['Strain'] >= 0.0005) & (dfdata['Strain'] <= 0.0025)]
-            X = filtered_df[['Strain']]
-            y = filtered_df['Stress (MPa)']
-            model = LinearRegression().fit(X, y)
-            Et_regr = model.coef_[0]
+            if len(filtered_df) < 2:
+                Et_regr = np.nan
+            else:
+                X = filtered_df[['Strain']]
+                y = filtered_df['Stress (MPa)']
+                model = LinearRegression().fit(X, y)
+                Et_regr = model.coef_[0]
             
             specimen_info = {
                 'Specimen Code': [specimen],
@@ -344,7 +383,8 @@ def process_tensile_data_directory(directory):
             
             
         except Exception as e:
-            # print(f"Error: {e}")
+            print(f"\nError: {e}")
+            print(f"Filepath: {filepath}")
             error_message.set(f"Error: {e}\t({filepath})")
     
     results_filepath = directory + "/Processed Test Data/Tensile_results.csv"
@@ -396,6 +436,10 @@ def process_flexural_data_directory(directory):
             L = 64  # span, mm
             h = specimen_thickness
             b = specimen_width
+            if h is None:
+                print(f'h is None for {filepath}')
+            if b is None:
+                print(f'b is None for {filepath}')
             
             dfnew['Stress (MPa)'] = (3 * L * dfnew['Savitzky-Golay Smoothed Load [N]']) / (2 * b * h**2)
             dfnew['Strain'] = (6 * h * dfnew['Recalculated Distance [mm]']) / (L**2)
@@ -430,11 +474,13 @@ def process_flexural_data_directory(directory):
             
             # Linear regression method for Young's Modulus
             filtered_df = dfnew[(dfnew['Strain'] >= 0.0005) & (dfnew['Strain'] <= 0.0025)]
-            # filtered_df = dfdata[(dfdata['Strain'] >= 0.0005) & (dfdata['Strain'] <= 0.0025)]
-            X = filtered_df[['Strain']]
-            y = filtered_df['Stress (MPa)']
-            model = LinearRegression().fit(X, y)
-            Et_regr = model.coef_[0]
+            if len(filtered_df) < 2:
+                Et_regr = np.nan
+            else:
+                X = filtered_df[['Strain']]
+                y = filtered_df['Stress (MPa)']
+                model = LinearRegression().fit(X, y)
+                Et_regr = model.coef_[0]
             
             specimen_info = {
                 'Specimen Code': [specimen],
@@ -497,7 +543,9 @@ if __name__ == "__main__":
     root.title("Mark-10 Data Processing")
     
     # Variables for directory paths and messages
-    tensile_directory = StringVar(value="G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Tensile Tests")
+    # tensile_directory = StringVar(value=r"H:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Tensile Tests")
+    # flexural_directory = StringVar(value=r"H:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Flexural Tests")
+    tensile_directory = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Tensile Tests")
     flexural_directory = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Flexural Tests")
     tensile_message = StringVar(value="")
     flexural_message = StringVar(value="")
