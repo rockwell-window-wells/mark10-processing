@@ -146,6 +146,28 @@ def find_results_file(datetime_string, filepaths_column):
         return None
     
 def read_rsl_file(filepath):
+    def detect_delimiter(filepath):
+        """
+        Detect the delimiter by analyzing the line starting with 'Run No.' and 
+        testing various delimiters for the best match.
+        """
+        common_delimiters = ['\t', ',', ';', '|', ' ']
+    
+        with open(filepath, 'r') as file:
+            for line in file:
+                if line.startswith("Run No."):  # Look for the 'Run No.' header line
+                    # Try each delimiter and return the one that produces the most reasonable split
+                    for delim in common_delimiters:
+                        split_line = line.strip().split(delim)
+                        # Heuristic: The header should produce more than 2 columns if split correctly
+                        if len(split_line) == 15:  # Adjust this condition if needed
+                            # print(f"Detected delimiter: {delim}")  # Debugging output
+                            return delim
+    
+        raise ValueError("Could not detect a valid delimiter or find a line starting with 'Run No.' in the file.")
+    
+    delim = detect_delimiter(filepath)
+    
     # metadata = {}
     data_lines = []
     reading_data = False
@@ -157,7 +179,8 @@ def read_rsl_file(filepath):
             if "Run No." in line:
                 reading_data = True
                 # reading_metadata = False
-                headers = line.strip().split("\t")  # Capture the table headers
+                headers = line.strip().split(delim)  # Capture the table headers
+                # headers = line.strip().split("\t")  # Capture the table headers
                 continue
             elif "Statistics" in line:
                 reading_data = False
@@ -167,7 +190,8 @@ def read_rsl_file(filepath):
             
             # If reading the data part, collect the rows
             if reading_data:
-                data_lines.append(line.strip().split("\t"))
+                data_lines.append(line.strip().split(delim))
+                # data_lines.append(line.strip().split("\t"))
 
                     
     # Create DataFrame from the data table portion
@@ -213,7 +237,42 @@ def read_rsl_file(filepath):
     
     return df
 
-def find_matching_specimen(datetime_substring, df):
+def combine_rsl_files(df):
+    df_results_files = df[df['Results']==True]
+    df_rsl_combined = pd.DataFrame()
+    for index, row in df_results_files.iterrows():
+        filepath = row['Filepath']
+        # print(row['Filepath'])
+        df_rsl = read_rsl_file(filepath)
+        df_rsl_combined = pd.concat([df_rsl_combined, df_rsl], axis=0, ignore_index=True)
+        
+    return df_rsl_combined
+        
+    
+
+def find_matching_specimen(datetime_substring, filepath, df_rsl_combined):
+    """
+    
+
+    Parameters
+    ----------
+    datetime_substring : TYPE
+        DESCRIPTION.
+    df : Pandas DataFrame
+        DataFrame with columns "Filepath", "Data", and "Results" that indicate
+        filepaths (not contents) and booleans to tell whether the filepath
+        points to a .log file or a .rsl file.
+
+    Returns
+    -------
+    specimen : TYPE
+        DESCRIPTION.
+    specimen_thickness : TYPE
+        DESCRIPTION.
+    specimen_width : TYPE
+        DESCRIPTION.
+
+    """
     # Convert datetime_substring to date and time data
     # month_map = {'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
     #          'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'}
@@ -257,25 +316,20 @@ def find_matching_specimen(datetime_substring, df):
     specimen_thickness = None
     specimen_width = None
     tolerance_seconds = 3
-    for filepath in df[df["Results"]==True]["Filepath"]:
-        df_results = read_rsl_file(filepath)
-        # df_results = df_results[df_results['Status']=='Complete'].copy()
         
-        for i in range(len(df_results)):
-            # if (df_results.loc[i,"Date"] == date) and (df_results.loc[i,"Time"] == time) and (df_results.loc[i,"Status"] == "Complete"):
-            df_time = df_results.loc[i, "Time"]
-            if (df_results.loc[i,"Date"] == date) and is_time_within_tolerance(df_time, time, tolerance_seconds) and (df_results.loc[i,"Status"] == "Complete"):
-                if "Specimen Code" in df_results.columns:
-                    specimen = df_results.loc[i,"Specimen Code"]
-                else:
-                    specimen = df_results.loc[i,"Specimen Number"]
-                specimen_thickness = df_results.loc[i,"Specimen Thickness"]
-                specimen_width = df_results.loc[i,"Specimen Width"]
-                break
-        if specimen and specimen_thickness and specimen_width:
-            specimen_thickness = float(specimen_thickness)
-            specimen_width = float(specimen_width)
+    for i in range(len(df_rsl_combined)):
+        df_time = df_rsl_combined.loc[i, "Time"]
+        if (df_rsl_combined.loc[i,"Date"] == date) and is_time_within_tolerance(df_time, time, tolerance_seconds) and (df_rsl_combined.loc[i,"Status"] == "Complete"):
+            if "Specimen Code" in df_rsl_combined.columns:
+                specimen = df_rsl_combined.loc[i,"Specimen Code"]
+            else:
+                specimen = df_rsl_combined.loc[i,"Specimen Number"]
+            specimen_thickness = df_rsl_combined.loc[i,"Specimen Thickness"]
+            specimen_width = df_rsl_combined.loc[i,"Specimen Width"]
             break
+    if specimen and specimen_thickness and specimen_width:
+        specimen_thickness = float(specimen_thickness)
+        specimen_width = float(specimen_width)
     if (specimen is None) and (specimen_thickness is None) and (specimen_width is None):
         # print(f"\nSpecimen details not detected. File: {filepath}")
         error_message.set(f"Specimen details not detected. File: {filepath}")
@@ -307,6 +361,15 @@ def process_tensile_data_directory(directory):
     df["Data"] = [True if (".log" in file) else False for file in df["File"]]
     df["Results"] = [True if (".rsl" in file) else False for file in df["File"]]
     
+    #################################
+    # Old approach: search through all .rsl files for every .log file
+    # New approach: Compile .rsl data into a single dataframe and search that
+    # for each .log file to determine the specimen parameters and name/code.
+    # Then perform calculations as normal.
+    df_rsl_combined = combine_rsl_files(df)
+    
+    # df_rsl_combined.to_excel('df_rsl_combined.xlsx')
+    
     df_results = pd.DataFrame()
     
     # Load the data files only
@@ -316,7 +379,7 @@ def process_tensile_data_directory(directory):
             dt = extract_datetime_string(filepath)
             
             # Step through the results files and get the specimen parameters
-            specimen, specimen_thickness, specimen_width = find_matching_specimen(dt, df)
+            specimen, specimen_thickness, specimen_width = find_matching_specimen(dt, filepath, df_rsl_combined)
             
             # Find the matching log file and search it for the 
             # Extract the force-displacement data from the data file
