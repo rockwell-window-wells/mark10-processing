@@ -20,6 +20,8 @@ from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 from datetime import datetime, timedelta
 from threading import Thread
+import logging
+import queue
 
 def apply_savgol_filter(data, window_size, poly_order):
     """
@@ -161,7 +163,7 @@ def read_rsl_file(filepath):
                     for delim in common_delimiters:
                         split_line = line.strip().split(delim)
                         # Heuristic: The header should produce more than 2 columns if split correctly
-                        if len(split_line) == 15:  # Adjust this condition if needed
+                        if len(split_line) > 2:  # Adjust this condition if needed
                             # print(f"Detected delimiter: {delim}")  # Debugging output
                             return delim
     
@@ -352,6 +354,8 @@ def is_time_within_tolerance(df_time_str, target_time_str, tolerance_seconds):
     return time_diff <= tolerance_seconds
             
 def process_tensile_data_directory(directory, progress_bar, progress_label):    
+    # logging.info("\nBEGIN PROCESSING TENSILE DATA")
+    
     # files = os.listdir(Path(directory))
     files = [f for f in os.listdir(Path(directory)) if os.path.isfile(os.path.join(directory, f))]
     data = {"File": files}
@@ -448,6 +452,8 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
                 
             dfdata.to_csv(data_filepath, mode='a', index=False)
             
+            # logging.info(f"Processed TENSILE {os.path.basename(filepath)}")
+            
             processed_files += 1
             progress_percent = int((processed_files / total_files) * 100)
             progress_bar["value"] = progress_percent
@@ -458,7 +464,8 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
         except Exception as e:
             print(f"\nError: {e}")
             print(f"Filepath: {filepath}")
-            error_message.set(f"Error: {e}\t({filepath})")
+            # error_message.set(f"Error: {e}\t({filepath})")
+            # logging.exception(f"Error for {os.path.basename(filepath)}: {e}")
     
     results_filepath = directory + "/Processed Test Data/Tensile_results.csv"
     df_results.to_csv(results_filepath)
@@ -473,7 +480,10 @@ def start_process_tensile_data_directory(directory, progress_bar, progress_label
     task_thread.start()
 
 
-def process_flexural_data_directory(directory, progress_bar, progress_label):    
+def process_flexural_data_directory(directory, progress_bar, progress_label):
+    # logging.info("\nBEGIN PROCESSING FLEXURAL DATA")
+    # import pdb; pdb.set_trace()
+    
     # files = os.listdir(Path(directory))
     files = [f for f in os.listdir(Path(directory)) if os.path.isfile(os.path.join(directory, f))]
     data = {"File": files}
@@ -589,6 +599,8 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
             dfnew.to_csv(data_filepath, mode='a', index=False)
             # dfdata.to_csv(data_filepath, mode='a', index=False)
             
+            # logging.info(f"Processed FLEXURAL {os.path.basename(filepath)}")
+            
             processed_files += 1
             progress_percent = int((processed_files / total_files) * 100)
             progress_bar["value"] = progress_percent
@@ -596,8 +608,9 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
             root.update_idletasks()
             
         except Exception as e:
-            # print(f"\nError: {e}\t({filepath})")
-            error_message.set(f"Error: {e}\t({filepath})")
+            print(f"\nError: {e}\t({filepath})")
+            # error_message.set(f"Error: {e}\t({filepath})")
+            # logging.exception(f"Error for {os.path.basename(filepath)}: {e}")
     
     results_filepath = directory + "/Processed Test Data/Flexural_results.csv"
     df_results.to_csv(results_filepath)
@@ -633,6 +646,30 @@ def select_flexural_directory():
     
 if __name__ == "__main__":
     # check_for_updates()
+    
+    start_datetime = str(datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
+    
+    # log_queue = queue.Queue()
+    
+    # class QueueHandler(logging.Handler):
+    #     def __init__(self, log_queue):
+    #         super().__init__()
+    #         self.log_queue = log_queue
+
+    #     def emit(self, record):
+    #         self.log_queue.put(self.format(record))
+
+    # # Logging setup
+    # logging.basicConfig(
+    #     filename=f"logs/{start_datetime}.log",
+    #     encoding="utf-8",
+    #     filemode="a",
+    #     level=logging.INFO,
+    #     format="%(asctime)s - %(levelname)s - %(message)s",
+    #     handlers=[QueueHandler(log_queue)],
+    #     style="%",
+    #     datefmt="%Y-%m-%d %H:%M:%S"
+    #     )
     
     # Main application window
     root = tk.Tk()
