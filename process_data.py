@@ -758,6 +758,22 @@ def select_flexural_directory():
     root.destroy()
     flexural_directory.set(directory)
     
+def remove_logger_handlers():
+    """
+    Removes handlers from the root logger to avoid issues on subsequent runs.
+    """
+    logger = logging.getLogger("ThreadSafeLogger")  # Get the root logger
+    for handler in logger.handlers[:]:
+        handler.close()  # Close each handler
+        logger.removeHandler(handler)  # Remove the handler from the logger
+        
+def on_gui_close(root):
+    """
+    Function to handle cleanup when the GUI is closed.
+    """
+    remove_logger_handlers()  # Cleanup logging
+    root.destroy()  # Close the window
+    
 if __name__ == "__main__":
     # check_for_updates()
     
@@ -800,7 +816,10 @@ if __name__ == "__main__":
     # log_thread.start()
     
     # Basic logging configuration
-    log_filename = f"logs/{start_datetime}.log"
+    log_dir = "mark10_logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    log_filename = f"{log_dir}/{start_datetime}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -812,6 +831,9 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.attributes("-topmost", True)
     root.title("Mark-10 Data Processing")
+    
+    # Bind the window close event to the on_gui_close function
+    root.protocol("WM_DELETE_WINDOW", lambda: on_gui_close(root))
     
     upper_frame = tk.Frame(root, padx=10, pady=10)
     upper_frame.grid(row=0, column=0, sticky="w")

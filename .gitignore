@@ -3,3 +3,8 @@
 *.csv
 *.spydata
 /logs
+/mark10_logs
+/build
+/dist
+*.spec
+build/process_data/Analysis-00.toc
