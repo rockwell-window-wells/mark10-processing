@@ -21,7 +21,106 @@ from scipy.signal import savgol_filter
 from datetime import datetime, timedelta
 from threading import Thread
 import logging
+from logging.handlers import QueueHandler, QueueListener
 import queue
+
+# # log_queue = queue.Queue()
+
+# # def setup_logger():
+# #     """
+# #     Configures the logging system to use a queue handler.
+# #     """
+# #     logger = logging.getLogger("ThreadSafeLogger")
+# #     logger.setLevel(logging.DEBUG)
+
+# #     # Create a handler that processes messages from the log queue
+# #     handler = logging.StreamHandler()
+# #     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+# #     handler.setFormatter(formatter)
+# #     logger.addHandler(handler)
+
+# #     return logger
+
+# def setup_logger(log_queue):
+#     """
+#     Configures the logging system to use a queue handler and file-based logging.
+#     """
+#     # Determine the current datetime for the log filename
+#     start_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+#     log_filename = f"logs/{start_datetime}.log"
+
+#     # Create a logger
+#     logger = logging.getLogger("ThreadSafeLogger")
+#     logger.setLevel(logging.INFO)
+    
+#     # Remove existing handlers to avoid duplication
+#     if logger.hasHandlers():
+#         logger.handlers.clear()
+
+#     # Create a file handler for logging to a file
+#     file_handler = logging.FileHandler(log_filename, mode="a", encoding="utf-8")
+#     file_handler.setFormatter(logging.Formatter(
+#         "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+#     ))
+
+#     # Create a QueueHandler for thread-safe logging
+#     queue_handler = QueueHandler(log_queue)
+
+#     # Add handlers to the logger
+#     logger.addHandler(file_handler)
+#     logger.addHandler(queue_handler)
+
+#     return logger
+
+# # logger = setup_logger(log_queue)
+
+# def log_worker(log_queue):
+#     """
+#     Worker thread to process log messages from the queue.
+#     """
+#     while True:
+#         try:
+#             record = log_queue.get()
+#             if record is None:  # Exit signal
+#                 break
+#             logger = logging.getLogger(record.name)
+            
+#             # Only process the record if it's a valid logger object
+#             if isinstance(logger, logging.Logger):
+#                 # Handle the log record
+#                 logger.handle(record)
+#                 logger.handlers[0].flush()
+#             else:
+#                 print(f"Invalid logger object: {logger}")
+#             # logger.handle(record)
+#             # logger.handlers[0].flush()
+#         except Exception:
+#             import traceback
+#             print("Exception in log_worker:", traceback.format_exc())
+#             break
+
+# # Start the logging worker thread
+# log_thread = Thread(target=log_worker, args=(log_queue,))
+# log_thread.daemon = True
+# log_thread.start()
+
+# def thread_safe_log(logger_name, level, msg):
+#     """
+#     Logs a message in a thread-safe manner by adding it to the queue.
+#     """
+#     logger = logging.getLogger(logger_name)  # Get the correct logger by name
+#     record = logger.makeRecord(logger_name, level, None, None, msg, None, None)
+#     log_queue.put(record)  # Put the log record into the queue
+#     log_queue.put(None)  # Signal to process the log immediately
+#     # # logger = logging.getLogger(logger_name)
+#     # # record = logger.makeRecord(
+#     # #     logger_name, level, fn="", lno=0, msg=msg, args=(), exc_info=None
+#     # # )
+#     # # log_queue.put(record)
+#     # # log_queue.put(None)
+#     # log_queue.put(logger.makeRecord(
+#     #     logger.name, level, None, None, msg, None, None))
+#     # log_queue.put(None)  # Signal to process the log immediately
 
 def apply_savgol_filter(data, window_size, poly_order):
     """
@@ -353,16 +452,15 @@ def is_time_within_tolerance(df_time_str, target_time_str, tolerance_seconds):
     # Check if the difference is within the tolerance
     return time_diff <= tolerance_seconds
             
-def process_tensile_data_directory(directory, progress_bar, progress_label):    
-    # logging.info("\nBEGIN PROCESSING TENSILE DATA")
+def process_tensile_data_directory(directory, progress_bar, progress_label):
+    logger = logging.getLogger("ThreadSafeLogger")
+    logger.info("BEGIN PROCESSING TENSILE DATA\n")
     
-    # files = os.listdir(Path(directory))
     files = [f for f in os.listdir(Path(directory)) if os.path.isfile(os.path.join(directory, f))]
     data = {"File": files}
     df = pd.DataFrame(data)
     
     df["Filepath"] = [(directory + "/" + file) for file in df["File"]]
-    # df["Filepath"] = [directory / file for file in df["File"]]
     df["Data"] = [True if (".log" in file) else False for file in df["File"]]
     df["Results"] = [True if (".rsl" in file) else False for file in df["File"]]
     
@@ -462,13 +560,22 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
             
             
         except Exception as e:
-            print(f"\nError: {e}")
-            print(f"Filepath: {filepath}")
+            # print(f"\nError: {e}")
+            # print(f"Filepath: {filepath}")
+            logger.error(f"{e}")
+            logger.error(f"Filepath: {filepath}\n")
+            # thread_safe_log("ThreadSafeLogger", logging.ERROR, f"{filepath}")
+            # thread_safe_log("ThreadSafeLogger", logging.ERROR, f"Error in tensile data processing: {str(e)}\n")
+            
             # error_message.set(f"Error: {e}\t({filepath})")
             # logging.exception(f"Error for {os.path.basename(filepath)}: {e}")
     
     results_filepath = directory + "/Processed Test Data/Tensile_results.csv"
     df_results.to_csv(results_filepath)
+    
+    logger.info(f"COMPLETED PROCESSING OF TENSILE DATA IN {directory}")
+    
+    # thread_safe_log("ThreadSafeLogger", logging.INFO, f"Completed processing of tensile data in {directory}")
     
     progress_label.config(text="Processing Complete")
     progress_bar["value"] = 100
@@ -477,12 +584,15 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
 
 def start_process_tensile_data_directory(directory, progress_bar, progress_label):
     task_thread = Thread(target=process_tensile_data_directory, args=(directory, progress_bar, progress_label))
+    task_thread.daemon = True
     task_thread.start()
 
 
 def process_flexural_data_directory(directory, progress_bar, progress_label):
     # logging.info("\nBEGIN PROCESSING FLEXURAL DATA")
     # import pdb; pdb.set_trace()
+    logger = logging.getLogger("ThreadSafeLogger")
+    logger.info("BEGIN PROCESSING FLEXURAL DATA\n")
     
     # files = os.listdir(Path(directory))
     files = [f for f in os.listdir(Path(directory)) if os.path.isfile(os.path.join(directory, f))]
@@ -608,12 +718,16 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
             root.update_idletasks()
             
         except Exception as e:
-            print(f"\nError: {e}\t({filepath})")
+            # print(f"\nError: {e}\t({filepath})")
+            logger.error(f"{e}")
+            logger.error(f"Filepath: {filepath}\n")
             # error_message.set(f"Error: {e}\t({filepath})")
             # logging.exception(f"Error for {os.path.basename(filepath)}: {e}")
     
     results_filepath = directory + "/Processed Test Data/Flexural_results.csv"
     df_results.to_csv(results_filepath)
+    
+    logger.info(f"COMPLETED PROCESSING OF FLEXURAL DATA IN {directory}")
     
     progress_label.config(text="Processing Complete")
     progress_bar["value"] = 100
@@ -649,27 +763,50 @@ if __name__ == "__main__":
     
     start_datetime = str(datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
     
-    # log_queue = queue.Queue()
+    # # log_queue = queue.Queue()
     
-    # class QueueHandler(logging.Handler):
-    #     def __init__(self, log_queue):
-    #         super().__init__()
-    #         self.log_queue = log_queue
+    # # class QueueHandler(logging.Handler):
+    # #     def __init__(self, log_queue):
+    # #         super().__init__()
+    # #         self.log_queue = log_queue
 
-    #     def emit(self, record):
-    #         self.log_queue.put(self.format(record))
+    # #     def emit(self, record):
+    # #         self.log_queue.put(self.format(record))
 
-    # # Logging setup
-    # logging.basicConfig(
-    #     filename=f"logs/{start_datetime}.log",
-    #     encoding="utf-8",
-    #     filemode="a",
-    #     level=logging.INFO,
-    #     format="%(asctime)s - %(levelname)s - %(message)s",
-    #     handlers=[QueueHandler(log_queue)],
-    #     style="%",
-    #     datefmt="%Y-%m-%d %H:%M:%S"
-    #     )
+    # # # Logging setup
+    # # logging.basicConfig(
+    # #     filename=f"logs/{start_datetime}.log",
+    # #     encoding="utf-8",
+    # #     filemode="a",
+    # #     level=logging.INFO,
+    # #     format="%(asctime)s - %(levelname)s - %(message)s",
+    # #     handlers=[QueueHandler(log_queue)],
+    # #     style="%",
+    # #     datefmt="%Y-%m-%d %H:%M:%S"
+    # #     )
+    
+    # log_queue = queue.Queue()
+    # logger = setup_logger(log_queue)
+    
+    # # for handler in logger.handlers:
+    # #     print(f"Handler type: {type(handler)}")
+    
+    # listener = QueueListener(log_queue, log_worker)
+    # listener.start()
+    
+    # # Start the logging worker thread
+    # log_thread = Thread(target=log_worker, args=(log_queue,))
+    # log_thread.daemon = True
+    # log_thread.start()
+    
+    # Basic logging configuration
+    log_filename = f"logs/{start_datetime}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        # handlers=[logging.StreamHandler()]
+        handlers=[logging.FileHandler(log_filename, mode='a', encoding='utf-8')]  # Log only to a file
+    )
     
     # Main application window
     root = tk.Tk()
