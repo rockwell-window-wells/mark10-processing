@@ -8,3 +8,4 @@
 /dist
 *.spec
 build/process_data/Analysis-00.toc
+*.toc
