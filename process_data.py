@@ -37,7 +37,6 @@ from threading import Thread
 import logging
 from logging.handlers import QueueHandler, QueueListener
 import queue
-import shutil
 
 
 # ── Registry helpers ──────────────────────────────────────────────────────────
@@ -107,6 +106,117 @@ def register_specimen(
     registry = pd.concat([registry, new_row], ignore_index=True)
     save_registry(directory, registry)
     return registry
+
+
+# ── Specimen code parser ──────────────────────────────────────────────────────
+
+def parse_specimen_code(code: str) -> dict:
+    """
+    Break a specimen code into its component parts.
+
+    Expected pattern (all parts except Truck, Well, Material Test Type, and
+    Orientation are optional):
+
+        T###  W#(#)  P#(#)  [I|P|T]  [F|T]  [V|H]  [1|2]
+
+    Examples that should all parse correctly:
+        T001W1P1FV1   → truck=T001, well=W1, pos=P1, phys=None, mat=F, ori=V, sample=1
+        T012W3P2ITFH  → truck=T012, well=W3, pos=P2, phys=I, mat=T (but wait —
+                         this is ambiguous with the Physical letter; see note below)
+        T005W10P3TV2  → truck=T005, well=W10, pos=P3, phys=T, mat=V... no —
+                         orientation is V/H, material is F/T
+
+    Ambiguity note: the Physical Test Type letter and the Material Test Type
+    letter share 'T' as a possible value.  The parser resolves this by treating
+    the Material Test Type as the LAST single-letter token before the optional
+    sample number, and the Physical Test Type (if present) as the token
+    immediately before it.
+
+    Returns a dict with keys:
+        Truck Number, Well Number, Position Number,
+        Physical Test Type, Material Test Type, Orientation, Sample Number
+    All values are strings or None if absent.
+    """
+    if not isinstance(code, str) or not code.strip():
+        return {k: None for k in (
+            "Truck Number", "Well Number", "Position Number",
+            "Physical Test Type", "Material Test Type", "Orientation", "Sample Number"
+        )}
+
+    s = code.strip()
+
+    # ── Fixed-position anchored components ────────────────────────────────────
+    truck    = re.search(r'(T\d{3})',          s, re.IGNORECASE)
+    well     = re.search(r'(W\d{1,2})',        s, re.IGNORECASE)
+    position = re.search(r'(P\d{1,2})',        s, re.IGNORECASE)
+
+    truck_val    = truck.group(1).upper()    if truck    else None
+    well_val     = well.group(1).upper()     if well     else None
+    position_val = position.group(1).upper() if position else None
+
+    # ── Trailing variable-length suffix after the positional tokens ───────────
+    # Strip everything we've already identified to isolate the suffix.
+    suffix = s
+    for pat in (r'T\d{3}', r'W\d{1,2}', r'P\d{1,2}'):
+        suffix = re.sub(pat, '', suffix, flags=re.IGNORECASE)
+    suffix = suffix.strip()
+
+    # Optional trailing sample number (1 or 2)
+    sample_match = re.search(r'([12])$', suffix)
+    sample_val   = sample_match.group(1) if sample_match else None
+    if sample_match:
+        suffix = suffix[:sample_match.start()].strip()
+
+    # Orientation — last remaining V or H
+    ori_match = re.search(r'([VH])$', suffix, re.IGNORECASE)
+    ori_val   = ori_match.group(1).upper() if ori_match else None
+    if ori_match:
+        suffix = suffix[:ori_match.start()].strip()
+
+    # Material test type — last remaining F or T
+    mat_match = re.search(r'([FT])$', suffix, re.IGNORECASE)
+    mat_val   = mat_match.group(1).upper() if mat_match else None
+    if mat_match:
+        suffix = suffix[:mat_match.start()].strip()
+
+    # Physical test type — whatever single letter remains (P, I, or T)
+    phys_match = re.search(r'([PIT])$', suffix, re.IGNORECASE)
+    phys_val   = phys_match.group(1).upper() if phys_match else None
+
+    return {
+        "Truck Number":        truck_val,
+        "Well Number":         well_val,
+        "Position Number":     position_val,
+        "Physical Test Type":  phys_val,
+        "Material Test Type":  mat_val,
+        "Orientation":         ori_val,
+        "Sample Number":       sample_val,
+    }
+
+
+def insert_parsed_code_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parse the 'Specimen Code' column and insert the component columns
+    immediately after it.  Safe to call on DataFrames that already have
+    some or all of those columns (they will be overwritten in place).
+    """
+    component_cols = [
+        "Truck Number", "Well Number", "Position Number",
+        "Physical Test Type", "Material Test Type", "Orientation", "Sample Number",
+    ]
+
+    parsed = df["Specimen Code"].apply(parse_specimen_code).apply(pd.Series)
+
+    # Drop any already-existing component columns so we can re-insert cleanly
+    df = df.drop(columns=[c for c in component_cols if c in df.columns])
+
+    # Find insertion point: one position after 'Specimen Code'
+    insert_at = df.columns.get_loc("Specimen Code") + 1
+
+    for i, col in enumerate(component_cols):
+        df.insert(insert_at + i, col, parsed[col])
+
+    return df
 
 
 # ── Existing helper functions (unchanged) ─────────────────────────────────────
@@ -401,6 +511,7 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
                 'Modulus of Elasticity - Regression': [Et_regr]}
 
             new_row = pd.DataFrame(specimen_info)
+            new_row = insert_parsed_code_columns(new_row)
             df_results = pd.concat([new_row, df_results], ignore_index=True)
             df_results.reset_index(drop=True, inplace=True)
 
@@ -432,6 +543,8 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
             df_results = pd.concat([df_existing, df_results], ignore_index=True)
             df_results = df_results.drop_duplicates(subset=["Specimen Code"], keep="last")
             df_results.reset_index(drop=True, inplace=True)
+        # Re-parse all codes so any rows loaded from an older file get the columns too
+        df_results = insert_parsed_code_columns(df_results)
         df_results.to_csv(results_filepath)
 
     logger.info(f"COMPLETED PROCESSING OF TENSILE DATA IN {directory}")
@@ -536,6 +649,7 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
                 'Modulus of Elasticity - Regression': [Et_regr]}
 
             new_row = pd.DataFrame(specimen_info)
+            new_row = insert_parsed_code_columns(new_row)
             df_results = pd.concat([new_row, df_results], ignore_index=True)
             df_results.reset_index(drop=True, inplace=True)
 
@@ -572,6 +686,8 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
             df_results = pd.concat([df_existing, df_results], ignore_index=True)
             df_results = df_results.drop_duplicates(subset=["Specimen Code"], keep="last")
             df_results.reset_index(drop=True, inplace=True)
+        # Re-parse all codes so any rows loaded from an older file get the columns too
+        df_results = insert_parsed_code_columns(df_results)
         df_results.to_csv(results_filepath)
 
     logger.info(f"COMPLETED PROCESSING OF FLEXURAL DATA IN {directory}")
@@ -619,38 +735,6 @@ def on_gui_close(root):
     remove_logger_handlers()
     root.destroy()
 
-def repair(filepath, strength_col_rename=None):
-    if not os.path.isfile(filepath):
-        print(f"  Not found, skipping: {filepath}")
-        return
-
-    df = pd.read_csv(filepath, index_col=0)
-    original_rows = len(df)
-
-    # Fix mis-labelled column if present
-    if strength_col_rename:
-        old_name, new_name = strength_col_rename
-        if old_name in df.columns:
-            df = df.rename(columns={old_name: new_name})
-            print(f"  Renamed column '{old_name}' → '{new_name}'")
-
-    # Collapse duplicate Specimen Code rows, keeping the last occurrence
-    df = df.drop_duplicates(subset=["Specimen Code"], keep="last")
-    df.reset_index(drop=True, inplace=True)
-    removed = original_rows - len(df)
-
-    if removed == 0 and strength_col_rename and strength_col_rename[0] not in pd.read_csv(filepath, index_col=0).columns:
-        print(f"  No changes needed: {filepath}")
-        return
-
-    # Back up the original before overwriting
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = filepath.replace(".csv", f"_backup_{timestamp}.csv")
-    shutil.copy2(filepath, backup_path)
-    print(f"  Backup saved to: {backup_path}")
-
-    df.to_csv(filepath)
-    print(f"  Removed {removed} duplicate row(s). Final row count: {len(df)}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
