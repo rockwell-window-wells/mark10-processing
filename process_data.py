@@ -37,6 +37,7 @@ from threading import Thread
 import logging
 from logging.handlers import QueueHandler, QueueListener
 import queue
+import shutil
 
 
 # ── Registry helpers ──────────────────────────────────────────────────────────
@@ -422,12 +423,15 @@ def process_tensile_data_directory(directory, progress_bar, progress_label):
             logger.error(f"{e}")
             logger.error(f"Filepath: {filepath}\n")
 
-    # Append new results to the running Tensile_results.csv rather than overwriting
+    # Append new results to the running Tensile_results.csv rather than overwriting.
+    # Deduplication is by Specimen Code so a rerun can never produce duplicate rows.
     results_filepath = directory + "/Processed Test Data/Tensile_results.csv"
     if not df_results.empty:
         if os.path.isfile(results_filepath):
             df_existing = pd.read_csv(results_filepath, index_col=0)
             df_results = pd.concat([df_existing, df_results], ignore_index=True)
+            df_results = df_results.drop_duplicates(subset=["Specimen Code"], keep="last")
+            df_results.reset_index(drop=True, inplace=True)
         df_results.to_csv(results_filepath)
 
     logger.info(f"COMPLETED PROCESSING OF TENSILE DATA IN {directory}")
@@ -554,12 +558,20 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
             logger.error(f"{e}")
             logger.error(f"Filepath: {filepath}\n")
 
-    # Append new results to the running Flexural_results.csv rather than overwriting
+    # Append new results to the running Flexural_results.csv rather than overwriting.
+    # Rename the legacy mis-labelled column if present in an existing file, then
+    # deduplicate by Specimen Code so reruns can never produce duplicate rows.
     results_filepath = directory + "/Processed Test Data/Flexural_results.csv"
     if not df_results.empty:
         if os.path.isfile(results_filepath):
             df_existing = pd.read_csv(results_filepath, index_col=0)
+            # Heal the old copy-paste column name error if still present
+            df_existing = df_existing.rename(
+                columns={"Ultimate Tensile Strength (MPa)": "Ultimate Flexural Strength (MPa)"}
+            )
             df_results = pd.concat([df_existing, df_results], ignore_index=True)
+            df_results = df_results.drop_duplicates(subset=["Specimen Code"], keep="last")
+            df_results.reset_index(drop=True, inplace=True)
         df_results.to_csv(results_filepath)
 
     logger.info(f"COMPLETED PROCESSING OF FLEXURAL DATA IN {directory}")
@@ -607,6 +619,38 @@ def on_gui_close(root):
     remove_logger_handlers()
     root.destroy()
 
+def repair(filepath, strength_col_rename=None):
+    if not os.path.isfile(filepath):
+        print(f"  Not found, skipping: {filepath}")
+        return
+
+    df = pd.read_csv(filepath, index_col=0)
+    original_rows = len(df)
+
+    # Fix mis-labelled column if present
+    if strength_col_rename:
+        old_name, new_name = strength_col_rename
+        if old_name in df.columns:
+            df = df.rename(columns={old_name: new_name})
+            print(f"  Renamed column '{old_name}' → '{new_name}'")
+
+    # Collapse duplicate Specimen Code rows, keeping the last occurrence
+    df = df.drop_duplicates(subset=["Specimen Code"], keep="last")
+    df.reset_index(drop=True, inplace=True)
+    removed = original_rows - len(df)
+
+    if removed == 0 and strength_col_rename and strength_col_rename[0] not in pd.read_csv(filepath, index_col=0).columns:
+        print(f"  No changes needed: {filepath}")
+        return
+
+    # Back up the original before overwriting
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = filepath.replace(".csv", f"_backup_{timestamp}.csv")
+    shutil.copy2(filepath, backup_path)
+    print(f"  Backup saved to: {backup_path}")
+
+    df.to_csv(filepath)
+    print(f"  Removed {removed} duplicate row(s). Final row count: {len(df)}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -637,8 +681,8 @@ if __name__ == "__main__":
     lower_frame = tk.Frame(root, padx=10, pady=10)
     lower_frame.grid(row=2, column=0, sticky="w")
 
-    tensile_directory  = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Tensile Tests")
-    flexural_directory = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/Engineering Projects/DLFT/DLFT Testing/Production Testing/Flexural Tests")
+    tensile_directory  = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/CAD/Engineering Efforts/DLFT/DLFT Testing/Production Testing/Tensile Tests")
+    flexural_directory = StringVar(value=r"G:/Shared drives/RockWell Shared/Engineering/CAD/Engineering Efforts/DLFT/DLFT Testing/Production Testing/Flexural Tests")
     tensile_message    = StringVar(value="")
     flexural_message   = StringVar(value="")
     error_message      = StringVar(value="")
