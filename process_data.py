@@ -380,13 +380,14 @@ def combine_rsl_files(df):
     return df_rsl_combined
 
 
-def find_matching_specimen(datetime_substring, filepath, df_rsl_combined):
+def find_matching_specimen(datetime_substring, filepath, df_rsl_combined, allow_invalid=False):
     pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2})-([A-Za-z]{2})"
     match = re.search(pattern, datetime_substring)
     if match:
         month_str, day, year, hour, minute, second, am_pm = match.groups()
         date = f"{month_str} {int(day)}, {year}"
-        time = f"{int(hour):02}:{minute}:{second} {am_pm.upper()}"
+        raw = f"{int(hour):02}:{minute}:{second} {am_pm.upper()}"
+        time = datetime.strptime(raw, '%I:%M:%S %p').strftime('%H:%M:%S')
     else:
         pattern = r"([A-Za-z]{3})-(\d{1,2})-(\d{4})-(\d{2})-(\d{2})-(\d{2})"
         match = re.search(pattern, datetime_substring)
@@ -405,13 +406,15 @@ def find_matching_specimen(datetime_substring, filepath, df_rsl_combined):
 
     for i in range(len(df_rsl_combined)):
         df_time = df_rsl_combined.loc[i, "Time"]
+        status = df_rsl_combined.loc[i, "Status"]
+        status_ok = (status == "Complete") or (allow_invalid and status == "Invalid")
         if (df_rsl_combined.loc[i, "Date"] == date) and \
            is_time_within_tolerance(df_time, time, tolerance_seconds) and \
-           (df_rsl_combined.loc[i, "Status"] == "Complete"):
+           status_ok:
             if "Specimen Code" in df_rsl_combined.columns:
-                specimen = df_rsl_combined.loc[i, "Specimen Code"]
+                specimen = df_rsl_combined.loc[i, "Specimen Code"].strip().upper()
             else:
-                specimen = df_rsl_combined.loc[i, "Specimen Number"]
+                specimen = df_rsl_combined.loc[i, "Specimen Number"].strip().upper()
             specimen_thickness = df_rsl_combined.loc[i, "Specimen Thickness"]
             specimen_width = df_rsl_combined.loc[i, "Specimen Width"]
             break
@@ -425,10 +428,16 @@ def find_matching_specimen(datetime_substring, filepath, df_rsl_combined):
 
 
 def is_time_within_tolerance(df_time_str, target_time_str, tolerance_seconds):
-    df_time = datetime.strptime(df_time_str, '%H:%M:%S').time()
-    target_time = datetime.strptime(target_time_str, '%H:%M:%S').time()
-    df_time_dt = datetime.combine(datetime.today(), df_time)
-    target_time_dt = datetime.combine(datetime.today(), target_time)
+    def parse_time(s):
+        for fmt in ('%H:%M:%S %p', '%I:%M:%S %p', '%H:%M:%S'):
+            try:
+                return datetime.strptime(s.strip(), fmt)
+            except ValueError:
+                continue
+        raise ValueError(f"Cannot parse time string: {s!r}")
+
+    df_time_dt     = parse_time(df_time_str)
+    target_time_dt = parse_time(target_time_str)
     time_diff = abs((df_time_dt - target_time_dt).total_seconds())
     return time_diff <= tolerance_seconds
 
@@ -596,7 +605,7 @@ def process_flexural_data_directory(directory, progress_bar, progress_label):
         source_basename = os.path.basename(filepath)
         try:
             dt = extract_datetime_string(filepath)
-            specimen, specimen_thickness, specimen_width = find_matching_specimen(dt, filepath, df_rsl_combined)
+            specimen, specimen_thickness, specimen_width = find_matching_specimen(dt, filepath, df_rsl_combined, allow_invalid=True)
 
             metadata, dfdata = read_log_file(filepath)
 
