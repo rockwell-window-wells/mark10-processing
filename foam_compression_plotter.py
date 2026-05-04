@@ -312,19 +312,17 @@ def find_initial_linear_region(df, max_distance=0.1, deviation_pct=0.05):
     return slope, x_fit[0], x_fit[-1]
 
 
-def find_secondary_linear_region(df, start_distance=0.15, deviation_pct=0.05):
+def find_secondary_linear_region(df, start_distance=0.15, tertiary_start=0.7, deviation_pct=0.05):
     """
     Find the secondary linear stiffness region (Distance >= start_distance,
-    up to the peak load).
-
-    Uses the same expanding-window residual approach but starting from
-    start_distance and stopping at peak load to exclude the softening tail.
+    up to min(peak load, tertiary_start) to avoid being pulled into the
+    tertiary stiffening region).
     """
     import numpy as np
 
-    # Stop at peak load to exclude end-of-test softening
     peak_idx = df["Load_smooth"].idxmax()
     region = df[(df["Distance"] >= start_distance) &
+                (df["Distance"] <  tertiary_start) &
                 (df.index <= peak_idx)].copy().reset_index(drop=True)
 
     if len(region) < 10:
@@ -368,28 +366,156 @@ def find_secondary_linear_region(df, start_distance=0.15, deviation_pct=0.05):
     return slope, x_fit[0], x_fit[-1]
 
 
-def analyze_curve(df):
+def find_tertiary_linear_region(df, search_start=0.60, deviation_pct=0.05):
     """
-    Run all three analyses on a single load-distance DataFrame.
-    Returns a dict with keys:
-        initial_stiffness, initial_x0, initial_x1,
-        secondary_stiffness, secondary_x0, secondary_x1,
-        peak_load
+    Detect the tertiary stiffness region that appears at high compression.
+
+    Strategy:
+      1. Compute a rolling slope (derivative) on the smoothed load curve.
+      2. Starting from search_start, find where the slope increases
+         significantly above the secondary-region slope — indicating a new,
+         stiffer regime.  This is the transition point.
+      3. From that transition point, run the same expanding-window linear
+         regression as the other region finders to get the tertiary stiffness.
+
+    Returns (slope, x_start, x_end, transition_x) or (None, None, None, None).
     """
     import numpy as np
 
+    peak_idx = df["Load_smooth"].idxmax()
+    full = df[df.index <= peak_idx].copy().reset_index(drop=True)
+    search = full[full["Distance"] >= search_start].reset_index(drop=True)
+
+    if len(search) < 20:
+        return None, None, None, None
+
+    x_all = full["Distance"].values
+    y_all = full["Load_smooth"].values
+    x_s   = search["Distance"].values
+    y_s   = search["Load_smooth"].values
+
+    # Rolling derivative over a window of ~20 points
+    WIN = 20
+    slopes_rolling = []
+    for i in range(len(x_s) - WIN):
+        seg_x = x_s[i:i + WIN]
+        seg_y = y_s[i:i + WIN]
+        if (seg_x[-1] - seg_x[0]) < 1e-4:
+            slopes_rolling.append(np.nan)
+            continue
+        c = np.polyfit(seg_x, seg_y, 1)
+        slopes_rolling.append(c[0])
+    slopes_rolling = np.array(slopes_rolling)
+
+    # Baseline slope: median of first third of the search window
+    # (representative of secondary region slope in this range)
+    n_base = max(10, len(slopes_rolling) // 3)
+    valid  = slopes_rolling[:n_base][np.isfinite(slopes_rolling[:n_base])]
+    if len(valid) == 0:
+        return None, None, None, None
+    baseline_slope = np.median(valid)
+
+    # Transition: first point where rolling slope exceeds baseline by >25%
+    threshold = baseline_slope * 1.25
+    transition_idx = None
+    for i, s in enumerate(slopes_rolling):
+        if np.isfinite(s) and s > threshold:
+            transition_idx = i
+            break
+
+    if transition_idx is None:
+        return None, None, None, None
+
+    transition_x = x_s[transition_idx]
+
+    # Now fit the tertiary region from transition_x to peak
+    tert = full[full["Distance"] >= transition_x].reset_index(drop=True)
+    if len(tert) < 10:
+        return None, None, None, None
+
+    x = tert["Distance"].values
+    y = tert["Load_smooth"].values
+
+    MIN_POINTS = 10
+    MIN_X_SPAN = 1e-4
+
+    last_good = MIN_POINTS
+    for end in range(MIN_POINTS + 1, len(x)):
+        if (x[end - 1] - x[0]) < MIN_X_SPAN:
+            last_good = end
+            continue
+        try:
+            coeffs = np.polyfit(x[:end], y[:end], 1)
+        except np.linalg.LinAlgError:
+            break
+        slope, intercept = coeffs
+        if not np.isfinite(slope):
+            break
+        y_pred = slope * x[:end] + intercept
+        residuals_pct = np.abs((y[:end] - y_pred) / np.maximum(np.abs(y_pred), 1e-6))
+        if residuals_pct.max() > deviation_pct:
+            break
+        last_good = end
+
+    x_fit = x[:last_good]
+    y_fit = y[:last_good]
+    if (x_fit[-1] - x_fit[0]) < MIN_X_SPAN:
+        return None, None, None, None
+    try:
+        coeffs = np.polyfit(x_fit, y_fit, 1)
+    except np.linalg.LinAlgError:
+        return None, None, None, None
+    slope = coeffs[0]
+    if not np.isfinite(slope):
+        return None, None, None, None
+    return slope, x_fit[0], x_fit[-1], transition_x
+
+
+def analyze_curve(df, platen_area=15.5, vacuum_ref_psi=13.56):
+    """
+    Run all analyses on a single load-distance DataFrame.
+    Returns a dict with keys:
+        initial_stiffness,  initial_x0,     initial_x1,
+        secondary_stiffness, secondary_x0,  secondary_x1,
+        tertiary_stiffness,  tertiary_x0,   tertiary_x1,  tertiary_transition_x,
+        peak_load,
+        vacuum_ref_distance  (distance at which load reaches vacuum reference load)
+    """
+    import numpy as np
+    from scipy.interpolate import interp1d
+
     k1, x1_0, x1_1 = find_initial_linear_region(df)
     k2, x2_0, x2_1 = find_secondary_linear_region(df)
+    k3, x3_0, x3_1, x3_trans = find_tertiary_linear_region(df)
     peak_load = df["Load_smooth"].max()
 
+    # Distance at vacuum reference load
+    ref_load = vacuum_ref_psi * platen_area
+    vac_dist = None
+    try:
+        # Only interpolate up to peak to avoid the descending tail
+        peak_idx = df["Load_smooth"].idxmax()
+        sub = df.iloc[:peak_idx + 1]
+        if sub["Load_smooth"].max() >= ref_load >= sub["Load_smooth"].min():
+            f = interp1d(sub["Load_smooth"], sub["Distance"],
+                         kind="linear", bounds_error=False)
+            vac_dist = float(f(ref_load))
+    except Exception:
+        pass
+
     return {
-        "initial_stiffness":   k1,
-        "initial_x0":          x1_0,
-        "initial_x1":          x1_1,
-        "secondary_stiffness": k2,
-        "secondary_x0":        x2_0,
-        "secondary_x1":        x2_1,
-        "peak_load":           peak_load,
+        "initial_stiffness":      k1,
+        "initial_x0":             x1_0,
+        "initial_x1":             x1_1,
+        "secondary_stiffness":    k2,
+        "secondary_x0":           x2_0,
+        "secondary_x1":           x2_1,
+        "tertiary_stiffness":     k3,
+        "tertiary_x0":            x3_0,
+        "tertiary_x1":            x3_1,
+        "tertiary_transition_x":  x3_trans,
+        "peak_load":              peak_load,
+        "vacuum_ref_distance":    vac_dist,
     }
 
 
@@ -592,13 +718,20 @@ class App(tk.Tk):
         for item in to_plot:
             item["analysis"] = analyze_curve(item["df"])
             results.append({
-                "Sample":                 label_map[item["path"]],
-                "Initial Stiffness (lbF/in)":   item["analysis"]["initial_stiffness"],
-                "Secondary Stiffness (lbF/in)": item["analysis"]["secondary_stiffness"],
-                "Peak Load (lbF)":              item["analysis"]["peak_load"],
+                "Sample":                        label_map[item["path"]],
+                "Initial Stiffness (lbF/in)":    item["analysis"]["initial_stiffness"],
+                "Secondary Stiffness (lbF/in)":  item["analysis"]["secondary_stiffness"],
+                "Tertiary Stiffness (lbF/in)":   item["analysis"]["tertiary_stiffness"],
+                "Tertiary Transition (in)":       item["analysis"]["tertiary_transition_x"],
+                "Vacuum Ref Distance (in)":       item["analysis"]["vacuum_ref_distance"],
+                "Peak Load (lbF)":               item["analysis"]["peak_load"],
             })
 
         # ── Draw ──────────────────────────────────────────────────────────────
+        PLATEN_AREA_IN2  = 15.5          # in²
+        VACUUM_REF_INHG  = 27.6          # inHg gauge
+        VACUUM_REF_PSI   = VACUUM_REF_INHG * 0.4912  # 13.56 psi
+
         fig, ax = plt.subplots(figsize=(11, 6))
         fig.patch.set_facecolor("#f8f8f8")
         ax.set_facecolor("#ffffff")
@@ -614,7 +747,6 @@ class App(tk.Tk):
             # Initial stiffness regression line
             if a["initial_stiffness"] is not None:
                 x0, x1 = a["initial_x0"], a["initial_x1"]
-                # Fit coeffs to get intercept for the line
                 seg = item["df"][(item["df"]["Distance"] >= x0) &
                                   (item["df"]["Distance"] <= x1)]
                 coeffs = np.polyfit(seg["Distance"], seg["Load"], 1)
@@ -632,14 +764,50 @@ class App(tk.Tk):
                 ax.plot(xs, np.polyval(coeffs, xs),
                         color=color, linewidth=2.5, linestyle=":", alpha=1.0)
 
+            # Tertiary stiffness regression line
+            if a["tertiary_stiffness"] is not None:
+                x0, x1 = a["tertiary_x0"], a["tertiary_x1"]
+                seg = item["df"][(item["df"]["Distance"] >= x0) &
+                                  (item["df"]["Distance"] <= x1)]
+                coeffs = np.polyfit(seg["Distance"], seg["Load"], 1)
+                xs = np.array([x0, x1])
+                ax.plot(xs, np.polyval(coeffs, xs),
+                        color=color, linewidth=2.5, linestyle=(0, (3, 1, 1, 1)), alpha=1.0)
+
+        # ── Twin y-axis: pressure (psi) ────────────────────────────────────────
+        ax2 = ax.twinx()
+        # Keep ax2 y-limits in sync with ax via the fixed area conversion
+        lbf_min, lbf_max = ax.get_ylim()
+        ax2.set_ylim(lbf_min / PLATEN_AREA_IN2, lbf_max / PLATEN_AREA_IN2)
+        ax2.set_ylabel("Pressure (psi)", fontsize=12)
+
+        # Sync limits whenever the primary axis is panned/zoomed
+        def _sync_pressure(event_ax):
+            y0, y1 = ax.get_ylim()
+            ax2.set_ylim(y0 / PLATEN_AREA_IN2, y1 / PLATEN_AREA_IN2)
+            fig.canvas.draw_idle()
+        ax.callbacks.connect("ylim_changed", lambda _: _sync_pressure(ax))
+
+        # Reference line at vacuum operating pressure
+        ref_lbf = VACUUM_REF_PSI * PLATEN_AREA_IN2
+        ax.axhline(ref_lbf, color="black", linewidth=1.2, linestyle="-.",
+                   label=f"Vacuum ref ({VACUUM_REF_INHG} inHg = {VACUUM_REF_PSI:.1f} psi)")
+
         # Legend for line styles
         from matplotlib.lines import Line2D
         style_legend = [
             Line2D([0], [0], color="gray", linewidth=1.8, alpha=0.9,  label="Raw data"),
             Line2D([0], [0], color="gray", linewidth=2.5, linestyle="--", label="Initial stiffness fit"),
             Line2D([0], [0], color="gray", linewidth=2.5, linestyle=":",  label="Secondary stiffness fit"),
+            Line2D([0], [0], color="gray", linewidth=2.5, linestyle=(0, (3, 1, 1, 1)), label="Tertiary stiffness fit"),
+            Line2D([0], [0], color="black", linewidth=1.2, linestyle="-.",
+                   label=f"Vacuum ref ({VACUUM_REF_INHG} inHg = {VACUUM_REF_PSI:.1f} psi)"),
         ]
+        # Sample legend (exclude the reference line which goes in the style legend)
         sample_handles, sample_labels = ax.get_legend_handles_labels()
+        # Drop the reference line entry (last item added to ax)
+        sample_handles = sample_handles[:-1]
+        sample_labels  = sample_labels[:-1]
         first_legend = ax.legend(handles=sample_handles, labels=sample_labels,
                                  loc="upper left", fontsize=9, framealpha=0.9,
                                  title="Sample", title_fontsize=10)
@@ -670,17 +838,18 @@ class App(tk.Tk):
         from itertools import combinations
 
         # ── Build DataFrame ───────────────────────────────────────────────────
-        df = pd.DataFrame(results).dropna(subset=[
-            "Initial Stiffness (lbF/in)",
-            "Secondary Stiffness (lbF/in)",
-            "Peak Load (lbF)",
-        ])
+        df = pd.DataFrame(results)
         df["Group"] = df["Sample"].str[0].str.upper()
+        # Only require the core columns to keep a row in the stats frame;
+        # optional columns (tertiary, vacuum dist) may be NaN and are handled per-subplot.
 
         params = [
-            ("Initial Stiffness (lbF/in)",   "Initial Stiffness",   "lbF/in"),
-            ("Secondary Stiffness (lbF/in)", "Secondary Stiffness", "lbF/in"),
-            ("Peak Load (lbF)",              "Peak Load",           "lbF"),
+            ("Initial Stiffness (lbF/in)",   "Initial Stiffness",       "lbF/in"),
+            ("Secondary Stiffness (lbF/in)", "Secondary Stiffness",     "lbF/in"),
+            ("Tertiary Stiffness (lbF/in)",  "Tertiary Stiffness",      "lbF/in"),
+            ("Tertiary Transition (in)",     "Tertiary Transition Dist","in"),
+            ("Vacuum Ref Distance (in)",     "Dist at Vacuum Ref Press","in"),
+            ("Peak Load (lbF)",              "Peak Load",               "lbF"),
         ]
         groups = sorted(df["Group"].unique())
         n_groups = len(groups)
@@ -725,7 +894,8 @@ class App(tk.Tk):
             return results
 
         # ── Figure: 3 box plots, one per parameter ────────────────────────────
-        fig, axes = plt.subplots(1, 3, figsize=(14, 6))
+        fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+        axes = axes.flatten()
         fig.suptitle("Parameter Comparison by Group", fontsize=14, fontweight="bold")
         fig.patch.set_facecolor("#f8f8f8")
 
@@ -861,18 +1031,26 @@ class App(tk.Tk):
         win.title("Analysis Results")
 
         cols = ["Sample", "Initial Stiffness (lbF/in)",
-                "Secondary Stiffness (lbF/in)", "Peak Load (lbF)"]
+                "Secondary Stiffness (lbF/in)", "Tertiary Stiffness (lbF/in)",
+                "Tertiary Transition (in)", "Vacuum Ref Distance (in)", "Peak Load (lbF)"]
 
         tree = ttk.Treeview(win, columns=cols, show="headings", height=min(len(results), 25))
         for col in cols:
             tree.heading(col, text=col)
-            tree.column(col, width=200 if col == "Sample" else 210, anchor="center")
+            tree.column(col, width=175, anchor="center")
 
         for row in sorted(results, key=lambda r: r["Sample"]):
-            k1  = f"{row['Initial Stiffness (lbF/in)']:.1f}"   if row["Initial Stiffness (lbF/in)"]   is not None else "N/A"
-            k2  = f"{row['Secondary Stiffness (lbF/in)']:.1f}" if row["Secondary Stiffness (lbF/in)"] is not None else "N/A"
-            pk  = f"{row['Peak Load (lbF)']:.1f}"
-            tree.insert("", tk.END, values=(row["Sample"], k1, k2, pk))
+            def fmt(val, dec=1):
+                return f"{val:.{dec}f}" if val is not None and val == val else "N/A"
+            tree.insert("", tk.END, values=(
+                row["Sample"],
+                fmt(row["Initial Stiffness (lbF/in)"]),
+                fmt(row["Secondary Stiffness (lbF/in)"]),
+                fmt(row["Tertiary Stiffness (lbF/in)"]),
+                fmt(row["Tertiary Transition (in)"], 3),
+                fmt(row["Vacuum Ref Distance (in)"], 3),
+                fmt(row["Peak Load (lbF)"]),
+            ))
 
         sb = ttk.Scrollbar(win, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
@@ -884,10 +1062,17 @@ class App(tk.Tk):
             header = "\t".join(cols)
             rows_txt = []
             for row in sorted(results, key=lambda r: r["Sample"]):
-                k1 = f"{row['Initial Stiffness (lbF/in)']:.1f}"   if row["Initial Stiffness (lbF/in)"]   is not None else "N/A"
-                k2 = f"{row['Secondary Stiffness (lbF/in)']:.1f}" if row["Secondary Stiffness (lbF/in)"] is not None else "N/A"
-                pk = f"{row['Peak Load (lbF)']:.1f}"
-                rows_txt.append(f"{row['Sample']}\t{k1}\t{k2}\t{pk}")
+                def fmt(val, dec=1):
+                    return f"{val:.{dec}f}" if val is not None and val == val else "N/A"
+                rows_txt.append("\t".join([
+                    row["Sample"],
+                    fmt(row["Initial Stiffness (lbF/in)"]),
+                    fmt(row["Secondary Stiffness (lbF/in)"]),
+                    fmt(row["Tertiary Stiffness (lbF/in)"]),
+                    fmt(row["Tertiary Transition (in)"], 3),
+                    fmt(row["Vacuum Ref Distance (in)"], 3),
+                    fmt(row["Peak Load (lbF)"]),
+                ]))
             win.clipboard_clear()
             win.clipboard_append(header + "\n" + "\n".join(rows_txt))
 
