@@ -1,5 +1,5 @@
 """
-Foam Compression Test Plotter
+Capstone Compression Analysis
 Loads multiple *_log.csv files, optionally correlates with a *.rsl.csv file,
 and plots Load vs Distance curves with grouped coloring.
 """
@@ -14,6 +14,48 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import colorsys
 from datetime import datetime
+
+
+# ── Test Name / Grid Utilities ────────────────────────────────────────────────
+
+# Format: <prefix><num>.<col>.<row>  e.g. W28.19.1
+# prefix+num = e.g. "W28", col = 2nd number (1-20), row = 3rd number (1-5 only)
+# Even col → reverse the row digit (1↔5, 2↔4, 3 stays)
+_TEST_NAME_RE = re.compile(r'^([A-Za-z]+\d+)\.(\d+)\.([1-5])$')
+
+# Column × 2.5 in → real-world X (inches)
+COL_SCALE = 2.5
+# Row × 24 in → real-world Y (inches)
+ROW_SCALE = 24.0
+
+# Reversal map for row digit when column number is even
+_ROW_REVERSE = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}
+
+
+def parse_test_name(name):
+    """
+    Parse a test name of the form <prefix>.<col>.<row> e.g. W28.19.1.
+    prefix  = leading letters + number (e.g. "W28")
+    col     = second number (1–20); real-world X = col × 2.5 in
+    row     = third number (1–5);   real-world Y = row × 24 in
+    If col is even, the row digit is reversed (1↔5, 2↔4, 3 stays).
+    Returns None if the name doesn't match the pattern.
+    """
+    m = _TEST_NAME_RE.match(name.strip())
+    if not m:
+        return None
+    prefix = m.group(1).upper()
+    col = int(m.group(2))
+    row = int(m.group(3))
+    if col % 2 == 0:
+        row = _ROW_REVERSE[row]
+    return {
+        "prefix":    prefix,
+        "col":       col,
+        "row":       row,
+        "col_coord": col * COL_SCALE,
+        "row_coord": row * ROW_SCALE,
+    }
 
 
 # ── File Parsing ──────────────────────────────────────────────────────────────
@@ -471,7 +513,7 @@ def find_tertiary_linear_region(df, search_start=0.60, deviation_pct=0.05):
     return slope, x_fit[0], x_fit[-1], transition_x
 
 
-def analyze_curve(df, platen_area=15.5, vacuum_ref_psi=13.56):
+def analyze_curve(df, vacuum_ref_load=100.0):
     """
     Run all analyses on a single load-distance DataFrame.
     Returns a dict with keys:
@@ -479,7 +521,7 @@ def analyze_curve(df, platen_area=15.5, vacuum_ref_psi=13.56):
         secondary_stiffness, secondary_x0,  secondary_x1,
         tertiary_stiffness,  tertiary_x0,   tertiary_x1,  tertiary_transition_x,
         peak_load,
-        vacuum_ref_distance  (distance at which load reaches vacuum reference load)
+        vacuum_ref_distance  (distance at which load first reaches vacuum_ref_load lbs)
     """
     import numpy as np
     from scipy.interpolate import interp1d
@@ -489,8 +531,8 @@ def analyze_curve(df, platen_area=15.5, vacuum_ref_psi=13.56):
     k3, x3_0, x3_1, x3_trans = find_tertiary_linear_region(df)
     peak_load = df["Load_smooth"].max()
 
-    # Distance at vacuum reference load
-    ref_load = vacuum_ref_psi * platen_area
+    # Distance at vacuum reference load (fixed 100 lbs)
+    ref_load = vacuum_ref_load
     vac_dist = None
     try:
         # Only interpolate up to peak to avoid the descending tail
@@ -524,12 +566,17 @@ def analyze_curve(df, platen_area=15.5, vacuum_ref_psi=13.56):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Foam Compression Plotter")
+        self.title("Capstone Compression Analysis")
         self.resizable(False, False)
-        self.log_files = []   # list of file paths
-        self.rsl_files = []   # list of RSL file paths
+        self.log_files = []
+        self.rsl_files = []
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
+
+    def _on_close(self):
+        self.quit()
+        self.destroy()
 
     def _build_ui(self):
         pad = dict(padx=10, pady=6)
@@ -588,7 +635,7 @@ class App(tk.Tk):
     def _add_log_files(self):
         paths = filedialog.askopenfilenames(
             title="Select log CSV files",
-            filetypes=[("Log CSV files", "*.csv"), ("All files", "*.*")]
+            filetypes=[("Log CSV files", "*log*.csv"), ("All files", "*.*")]
         )
         for p in paths:
             if p not in self.log_files:
@@ -608,7 +655,7 @@ class App(tk.Tk):
     def _add_rsl_files(self):
         paths = filedialog.askopenfilenames(
             title="Select RSL CSV files",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            filetypes=[("RSL CSV files", "*rsl*.csv"), ("All files", "*.*")]
         )
         for p in paths:
             if p not in self.rsl_files:
@@ -746,8 +793,9 @@ class App(tk.Tk):
         results = []
         for item in to_plot:
             item["analysis"] = analyze_curve(item["df"])
+            label = label_map[item["path"]]
             results.append({
-                "Sample":                        label_map[item["path"]],
+                "Sample":                        label,
                 "Initial Stiffness (lbF/in)":    item["analysis"]["initial_stiffness"],
                 "Secondary Stiffness (lbF/in)":  item["analysis"]["secondary_stiffness"],
                 "Tertiary Stiffness (lbF/in)":   item["analysis"]["tertiary_stiffness"],
@@ -757,9 +805,7 @@ class App(tk.Tk):
             })
 
         # ── Draw ──────────────────────────────────────────────────────────────
-        PLATEN_AREA_IN2  = 15.5          # in²
-        VACUUM_REF_INHG  = 27.6          # inHg gauge
-        VACUUM_REF_PSI   = VACUUM_REF_INHG * 0.4912  # 13.56 psi
+        VACUUM_REF_LBF = 100.0   # fixed reference load (lbs)
 
         fig, ax = plt.subplots(figsize=(11, 6))
         fig.patch.set_facecolor("#f8f8f8")
@@ -804,23 +850,21 @@ class App(tk.Tk):
                         color=color, linewidth=2.5, linestyle=(0, (3, 1, 1, 1)), alpha=1.0)
 
         # ── Twin y-axis: pressure (psi) ────────────────────────────────────────
+        PLATEN_AREA_IN2 = 15.5
         ax2 = ax.twinx()
-        # Keep ax2 y-limits in sync with ax via the fixed area conversion
         lbf_min, lbf_max = ax.get_ylim()
         ax2.set_ylim(lbf_min / PLATEN_AREA_IN2, lbf_max / PLATEN_AREA_IN2)
         ax2.set_ylabel("Pressure (psi)", fontsize=12)
 
-        # Sync limits whenever the primary axis is panned/zoomed
         def _sync_pressure(event_ax):
             y0, y1 = ax.get_ylim()
             ax2.set_ylim(y0 / PLATEN_AREA_IN2, y1 / PLATEN_AREA_IN2)
             fig.canvas.draw_idle()
         ax.callbacks.connect("ylim_changed", lambda _: _sync_pressure(ax))
 
-        # Reference line at vacuum operating pressure
-        ref_lbf = VACUUM_REF_PSI * PLATEN_AREA_IN2
-        ax.axhline(ref_lbf, color="black", linewidth=1.2, linestyle="-.",
-                   label=f"Vacuum ref ({VACUUM_REF_INHG} inHg = {VACUUM_REF_PSI:.1f} psi)")
+        # Reference line at 100 lbF
+        ax.axhline(VACUUM_REF_LBF, color="black", linewidth=1.2, linestyle="-.",
+                   label=f"Vacuum ref (100 lbF)")
 
         # Legend for line styles
         from matplotlib.lines import Line2D
@@ -830,7 +874,7 @@ class App(tk.Tk):
             Line2D([0], [0], color="gray", linewidth=2.5, linestyle=":",  label="Secondary stiffness fit"),
             Line2D([0], [0], color="gray", linewidth=2.5, linestyle=(0, (3, 1, 1, 1)), label="Tertiary stiffness fit"),
             Line2D([0], [0], color="black", linewidth=1.2, linestyle="-.",
-                   label=f"Vacuum ref ({VACUUM_REF_INHG} inHg = {VACUUM_REF_PSI:.1f} psi)"),
+                   label="Vacuum ref (100 lbF)"),
         ]
         # Sample legend (exclude the reference line which goes in the style legend)
         sample_handles, sample_labels = ax.get_legend_handles_labels()
@@ -845,21 +889,125 @@ class App(tk.Tk):
 
         ax.set_xlabel("Distance (in)", fontsize=12)
         ax.set_ylabel("Load (lbF)", fontsize=12)
-        ax.set_title("Foam Compression – Load vs Distance", fontsize=14, fontweight="bold")
+        ax.set_title("Capstone Compression – Load vs Distance", fontsize=14, fontweight="bold")
         ax.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
-        plt.show()
+        plt.show(block=False)
+        plt.pause(0.1)
 
-        # ── Results table window ──────────────────────────────────────────────
+        # ── Schedule remaining windows via Tkinter event loop ─────────────────
+        # Using after() ensures each figure is fully rendered before the next
+        # is created, which is necessary when running inside Spyder/IPython.
         self._show_results(results)
+        self.after(200,  lambda: self._show_heatmaps(results))
+        self.after(1800, lambda: self._show_statistics(results, group_by="col", title_suffix="Column"))
+        self.after(2000, lambda: self._show_statistics(results, group_by="row", title_suffix="Row"))
 
-        # ── Statistical comparison figure ─────────────────────────────────────
-        self._show_statistics(results)
-
-    def _show_statistics(self, results):
+    def _show_heatmaps(self, results):
         """
-        Box plots + one-way ANOVA + Tukey HSD for each of the three parameters,
-        grouped by the leading letter of the sample name.
+        Interpolated heat-map plots of each analysis property over real-world
+        (col_coord, row_coord) grid coordinates. Each property gets its own figure.
+        """
+        import numpy as np
+        import pandas as pd
+        from scipy.interpolate import griddata
+
+        # Build a frame with grid coords
+        rows = []
+        for r in results:
+            parsed = parse_test_name(r["Sample"])
+            if parsed is None:
+                continue
+            rows.append({
+                "col":       parsed["col"],
+                "row":       parsed["row"],
+                "col_coord": parsed["col_coord"],
+                "row_coord": parsed["row_coord"],
+                **{k: v for k, v in r.items() if k != "Sample"},
+            })
+        if not rows:
+            return
+
+        df = pd.DataFrame(rows)
+        # Average all replicates at the same grid position
+        df = df.groupby(["col", "row", "col_coord", "row_coord"], as_index=False).mean(numeric_only=True)
+
+        params = [
+            ("Initial Stiffness (lbF/in)",   "Initial Stiffness",        "lbF/in"),
+            ("Secondary Stiffness (lbF/in)", "Secondary Stiffness",      "lbF/in"),
+            ("Tertiary Stiffness (lbF/in)",  "Tertiary Stiffness",       "lbF/in"),
+            ("Tertiary Transition (in)",     "Tertiary Transition Dist", "in"),
+            ("Vacuum Ref Distance (in)",     "Dist at 100 lbF Ref",      "in"),
+            ("Peak Load (lbF)",              "Peak Load",                "lbF"),
+        ]
+
+        for data_col, title, unit in params:
+            valid = df[["col", "row", "col_coord", "row_coord", data_col]].dropna()
+            if len(valid) < 3:
+                continue
+
+            x = valid["col_coord"].values
+            y = valid["row_coord"].values
+            vals = valid[data_col].values
+
+            # Build interpolation grid
+            xi = np.linspace(x.min(), x.max(), 300)
+            yi = np.linspace(y.min(), y.max(), 300)
+            Xi, Yi = np.meshgrid(xi, yi)
+
+            # Interpolate (cubic with linear fallback for edges)
+            try:
+                Zi = griddata(np.column_stack([x, y]), vals, (Xi, Yi), method="cubic")
+                Zi_lin = griddata(np.column_stack([x, y]), vals, (Xi, Yi), method="linear")
+                Zi = np.where(np.isnan(Zi), Zi_lin, Zi)
+            except Exception:
+                Zi = griddata(np.column_stack([x, y]), vals, (Xi, Yi), method="linear")
+
+            fig, ax = plt.subplots(figsize=(10, 7))
+            fig.patch.set_facecolor("#f8f8f8")
+
+            im = ax.pcolormesh(Xi, Yi, Zi, cmap="plasma", shading="auto")
+            cb = fig.colorbar(im, ax=ax)
+            cb.set_label(unit, fontsize=11)
+
+            # Scatter overlay for actual averaged data points
+            ax.scatter(x, y,
+                       c=vals, cmap="plasma",
+                       vmin=im.norm.vmin, vmax=im.norm.vmax,
+                       edgecolors="white", linewidths=0.8,
+                       s=80, zorder=5)
+
+            # Label each point with col.row
+            for _, row_r in valid.iterrows():
+                ax.annotate(f"{int(row_r['col'])}.{int(row_r['row'])}",
+                            (row_r["col_coord"], row_r["row_coord"]),
+                            fontsize=7, ha="center", va="bottom",
+                            color="white", fontweight="bold",
+                            xytext=(0, 5), textcoords="offset points")
+
+            # Tick marks at actual column and row coordinates
+            ax.set_xticks(sorted(valid["col_coord"].unique()))
+            ax.set_xticklabels([f"Col {int(c/COL_SCALE)}\n({c:.1f}\")" for c in sorted(valid["col_coord"].unique())],
+                               fontsize=8)
+            ax.set_yticks(sorted(valid["row_coord"].unique()))
+            ax.set_yticklabels([f"Row {int(r/ROW_SCALE)}\n({r:.0f}\")" for r in sorted(valid["row_coord"].unique())],
+                               fontsize=8)
+
+            ax.set_xlabel("Column Position (in)", fontsize=11)
+            ax.set_ylabel("Row Position (in)", fontsize=11)
+            ax.set_title(f"Spatial Heat Map – {title}", fontsize=13, fontweight="bold")
+            ax.set_facecolor("#888888")
+
+            plt.tight_layout()
+            plt.show(block=False)
+            plt.pause(0.1)
+
+
+    def _show_statistics(self, results, group_by="col", title_suffix="Column"):
+        """
+        Box plots + one-way ANOVA + Tukey HSD for each analysis parameter,
+        grouped by column number or row number parsed from the test name.
+        group_by: "col" or "row"
         """
         import numpy as np
         import pandas as pd
@@ -868,7 +1016,17 @@ class App(tk.Tk):
 
         # ── Build DataFrame ───────────────────────────────────────────────────
         df = pd.DataFrame(results)
-        df["Group"] = df["Sample"].str[0].str.upper()
+
+        def _get_group(sample):
+            parsed = parse_test_name(sample)
+            if parsed is None:
+                return None
+            return str(parsed[group_by])  # col or row number as string label
+
+        df["Group"] = df["Sample"].apply(_get_group)
+        df = df.dropna(subset=["Group"])
+        if df.empty:
+            return
         # Only require the core columns to keep a row in the stats frame;
         # optional columns (tertiary, vacuum dist) may be NaN and are handled per-subplot.
 
@@ -880,14 +1038,13 @@ class App(tk.Tk):
             ("Vacuum Ref Distance (in)",     "Dist at Vacuum Ref Press","in"),
             ("Peak Load (lbF)",              "Peak Load",               "lbF"),
         ]
-        groups = sorted(df["Group"].unique())
+        groups = sorted(df["Group"].unique(), key=lambda g: int(g) if g.isdigit() else g)
         n_groups = len(groups)
 
-        # Colors matched to the main plot palette
-        group_colors = {}
-        for g in groups:
-            dummy = make_palette({g: [g]})
-            group_colors[g] = dummy[g]
+        # Assign a distinct color per group using a qualitative colormap
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap("tab20", max(n_groups, 1))
+        group_colors = {g: cmap(i)[:3] for i, g in enumerate(groups)}
 
         # ── Tukey HSD (manual, no statsmodels required) ───────────────────────
         def tukey_hsd(group_data):
@@ -922,10 +1079,9 @@ class App(tk.Tk):
                 results[(a, b)] = (np.mean(va) - np.mean(vb), p)
             return results
 
-        # ── Figure: 3 box plots, one per parameter ────────────────────────────
         fig, axes = plt.subplots(2, 3, figsize=(16, 10))
         axes = axes.flatten()
-        fig.suptitle("Parameter Comparison by Group", fontsize=14, fontweight="bold")
+        fig.suptitle(f"Parameter Comparison by {title_suffix} Number", fontsize=14, fontweight="bold")
         fig.patch.set_facecolor("#f8f8f8")
 
         stat_lines = []  # collect text for the summary panel
@@ -934,7 +1090,7 @@ class App(tk.Tk):
             group_data = {g: df[df["Group"] == g][col].dropna().values
                           for g in groups}
             group_data = {g: v for g, v in group_data.items() if len(v) > 0}
-            active_groups = sorted(group_data.keys())
+            active_groups = sorted(group_data.keys(), key=lambda g: int(g) if g.isdigit() else g)
 
             # Box plot
             bp = ax.boxplot(
@@ -966,6 +1122,7 @@ class App(tk.Tk):
             ax.set_xticklabels(active_groups, fontsize=11)
             ax.set_title(title, fontsize=12, fontweight="bold")
             ax.set_ylabel(unit, fontsize=10)
+            ax.set_xlabel(f"{title_suffix} Number", fontsize=10)
             ax.set_facecolor("#ffffff")
             ax.grid(axis="y", linestyle="--", alpha=0.5)
 
@@ -980,34 +1137,19 @@ class App(tk.Tk):
                 sig = "***" if p_anova < 0.001 else "**" if p_anova < 0.01 else "*" if p_anova < 0.05 else "ns"
                 stat_lines.append(f"One-way ANOVA:  F = {f_stat:.3f},  p = {p_anova:.4f}  {sig}")
 
-                # Annotate ANOVA result on plot
+                # Annotate ANOVA result on plot title only (no brackets)
                 ax.set_title(f"{title}\nANOVA p = {p_anova:.3f} {sig}",
                              fontsize=11, fontweight="bold")
 
-                # ── Tukey HSD pairwise ────────────────────────────────────────
+                # ── Tukey HSD pairwise (text summary only, no plot brackets) ──
                 tukey = tukey_hsd(group_data)
                 stat_lines.append("Tukey HSD pairwise:")
-                y_max   = max(v.max() for v in group_data.values())
-                y_range = y_max - min(v.min() for v in group_data.values())
-                bracket_step = y_range * 0.12
-
-                for pair_idx, ((a, b), (diff, p)) in enumerate(tukey.items()):
+                for (a, b), (diff, p) in tukey.items():
                     if p is None:
                         stat_lines.append(f"  {a} vs {b}:  Δ = {diff:+.2f}  (insufficient n)")
                         continue
                     sig_pair = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
                     stat_lines.append(f"  {a} vs {b}:  Δ = {diff:+.2f} {unit},  p = {p:.4f}  {sig_pair}")
-
-                    # Significance bracket on plot
-                    x1 = active_groups.index(a) + 1
-                    x2 = active_groups.index(b) + 1
-                    y  = y_max + bracket_step * (pair_idx + 1)
-                    ax.annotate("", xy=(x2, y), xytext=(x1, y),
-                                arrowprops=dict(arrowstyle="-", color="black", lw=1.2))
-                    ax.plot([x1, x1], [y - bracket_step * 0.15, y], color="black", lw=1.2)
-                    ax.plot([x2, x2], [y - bracket_step * 0.15, y], color="black", lw=1.2)
-                    ax.text((x1 + x2) / 2, y + bracket_step * 0.05,
-                            sig_pair, ha="center", va="bottom", fontsize=10)
             else:
                 stat_lines.append("Insufficient groups for ANOVA (need ≥ 2 groups with n ≥ 2)")
 
@@ -1023,11 +1165,11 @@ class App(tk.Tk):
                 )
 
         plt.tight_layout()
-        plt.show()
+        plt.show(block=False)
+        plt.pause(0.1)
 
-        # ── Statistics text window ────────────────────────────────────────────
         win = tk.Toplevel(self)
-        win.title("Statistical Summary")
+        win.title(f"Statistical Summary – by {title_suffix}")
 
         txt = tk.Text(win, width=60, height=30, font=("Courier", 9),
                       bg="#f8f8f8", relief=tk.FLAT, wrap=tk.NONE)
@@ -1061,7 +1203,7 @@ class App(tk.Tk):
 
         cols = ["Sample", "Initial Stiffness (lbF/in)",
                 "Secondary Stiffness (lbF/in)", "Tertiary Stiffness (lbF/in)",
-                "Tertiary Transition (in)", "Vacuum Ref Distance (in)", "Peak Load (lbF)"]
+                "Tertiary Transition (in)", "Dist at 100 lbF Ref (in)", "Peak Load (lbF)"]
 
         tree = ttk.Treeview(win, columns=cols, show="headings", height=min(len(results), 25))
         for col in cols:
@@ -1111,5 +1253,7 @@ class App(tk.Tk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import signal
     app = App()
+    signal.signal(signal.SIGINT, lambda *_: app._on_close())
     app.mainloop()
